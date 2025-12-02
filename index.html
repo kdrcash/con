@@ -28,38 +28,198 @@
         }
     </style>
     <script>
+        // --- Tax Calculation Helper ---
+        const calculateSimulatedIncomeTax = (taxableIncome) => {
+            const tb = Math.max(0, Math.floor(taxableIncome));
+            let tax = 0;
+            
+            if (tb <= 14_000_000)      { tax = tb * 0.06; }
+            else if (tb <= 50_000_000) { tax = tb * 0.15 - 1_260_000; }
+            else if (tb <= 88_000_000) { tax = tb * 0.24 - 5_760_000; }
+            else if (tb <= 150_000_000){ tax = tb * 0.35 - 15_440_000; }
+            else if (tb <= 300_000_000){ tax = tb * 0.38 - 19_940_000; }
+            else if (tb <= 500_000_000){ tax = tb * 0.40 - 25_940_000; }
+            else if (tb <= 1_000_000_000){ tax = tb * 0.42 - 35_940_000; }
+            else { tax = tb * 0.45 - 65_940_000; }
+            
+            return Math.max(0, Math.floor(tax)); 
+        };
+
+        // --- Core Calculation Logic ---
+        const calculateResults = (inputs, mode) => {
+            let { annualRevenue, monthlyExpense, monthlyRequiredExpense, targetProfitRate, afterTaxNetIncome } = inputs;
+            
+            const annualExp = monthlyExpense * 12; // 연간 고정 지출 (월지출 * 12)
+            const annualReqExpInput = monthlyRequiredExpense * 12; // 연간 필요 경비 (입력)
+
+            let calculatedAnnualRevenue = annualRevenue;
+            let calculatedMonthlyRequiredExpense = monthlyRequiredExpense;
+            let calculatedTargetProfitRate = targetProfitRate;
+            
+            // DUMMY_TAX_RATE는 Mode 3, 5의 역산 과정에 사용됨
+            const DUMMY_TAX_RATE = 0.15; 
+            
+            let actualNetIncome = 0; // 실제 순이익 (연매출 - 월지출*12)
+            let taxBaseIncome = 0; // 목표 순이익 (실제 순이익 - 월필요경비*12), 과세표준으로 사용
+
+            switch (mode) {
+                // Mode 1: 입력(ME, MRE, TPR), 출력(AR, MTNI)
+                case 'mode1':
+                    const totalExpenseInput = annualExp + annualReqExpInput; // 총 연간 경비 (고정+필요)
+                    const profitRatioComplement = (1 - targetProfitRate / 100);
+
+                    // 1. AR = 총 경비 / (1 - 목표소득률)
+                    if (profitRatioComplement > 0 && targetProfitRate < 100) {
+                        calculatedAnnualRevenue = totalExpenseInput / profitRatioComplement;
+                    } else {
+                        calculatedAnnualRevenue = 0;
+                    }
+                    
+                    // 2. 실제 순이익 (ANI) = AR - 월지출*12
+                    actualNetIncome = calculatedAnnualRevenue - annualExp;
+                    
+                    // 3. 과세표준 (TNI) = ANI - 월필요경비*12
+                    taxBaseIncome = actualNetIncome - annualReqExpInput;
+                    
+                    calculatedMonthlyRequiredExpense = monthlyRequiredExpense;
+                    calculatedTargetProfitRate = targetProfitRate;
+                    break;
+                    
+                // Mode 2: 입력(AR, ME, MRE), 출력(AR, TPR)
+                case 'mode2':
+                    // 1. 실제 순이익 (ANI) = AR - 월지출*12
+                    actualNetIncome = annualRevenue - annualExp;
+                    
+                    // 2. 과세표준 (TNI) = ANI - 월필요경비*12
+                    taxBaseIncome = actualNetIncome - annualReqExpInput;
+                    
+                    // 3. 목표소득률 (TPR) = TNI / AR
+                    calculatedTargetProfitRate = (annualRevenue !== 0) ? (taxBaseIncome / annualRevenue) * 100 : 0;
+
+                    calculatedMonthlyRequiredExpense = monthlyRequiredExpense;
+                    break;
+                
+                // Mode 3: 입력(AR, ME, MTNI), 출력(AR, MRE)
+                case 'mode3':
+                    // 목표 세전 순이익 (TNI) = MTNI를 임의세율로 역산한 값
+                    const targetTNI_M3 = (afterTaxNetIncome * 12) / (1 - DUMMY_TAX_RATE);
+                    
+                    const actualNetIncome_M3 = annualRevenue - annualExp;
+                    
+                    // MRE = (ANI - TNI) / 12
+                    calculatedMonthlyRequiredExpense = (actualNetIncome_M3 - targetTNI_M3) / 12;
+
+                    calculatedTargetProfitRate = targetProfitRate;
+                    
+                    // ANI (실제 순이익)와 TNI (과세표준) 계산
+                    actualNetIncome = actualNetIncome_M3;
+                    taxBaseIncome = targetTNI_M3;
+                    break;
+                    
+                // Mode 4: 입력(AR, ME, TPR), 출력(MRE, MTNI)
+                case 'mode4':
+                    // 1. 실제 순이익 (ANI) = AR - 월지출*12
+                    actualNetIncome = annualRevenue - annualExp;
+                    
+                    // 2. 과세표준 (TNI) = AR * TPR (목표 소득률 기반)
+                    taxBaseIncome = annualRevenue * (targetProfitRate / 100);
+                    
+                    // 3. 월필요경비 (MRE) = (ANI - TNI) / 12
+                    calculatedMonthlyRequiredExpense = (actualNetIncome - taxBaseIncome) / 12;
+                    
+                    calculatedAnnualRevenue = annualRevenue;
+                    calculatedTargetProfitRate = targetProfitRate;
+                    break;
+                    
+                // Mode 5: 입력(AR, ME, MTNI), 출력(MRE, TPR)
+                case 'mode5':
+                    // 목표 세전 순이익 (TNI) = MTNI를 임의세율로 역산한 값
+                    const targetTNI_M5 = (afterTaxNetIncome * 12) / (1 - DUMMY_TAX_RATE);
+                    
+                    // 1. 실제 순이익 (ANI) = AR - 월지출*12
+                    actualNetIncome = annualRevenue - annualExp;
+                    
+                    // 2. 월필요경비 (MRE) = (ANI - TNI) / 12
+                    calculatedMonthlyRequiredExpense = (actualNetIncome - targetTNI_M5) / 12;
+                    
+                    // 3. 목표소득률 (TPR) = TNI / AR
+                    calculatedTargetProfitRate = (annualRevenue !== 0) ? (targetTNI_M5 / annualRevenue) * 100 : 0;
+
+                    calculatedAnnualRevenue = annualRevenue;
+                    break;
+                default:
+                    taxBaseIncome = 0;
+                    break;
+            }
+            
+            // 모든 결과 값이 유효한 숫자인지 확인하고, 아니면 0으로 보정 (BUG FIX 강화)
+            const validate = (val) => Number.isFinite(val) ? val : 0;
+            
+            const finalAnnualRev = validate(calculatedAnnualRevenue);
+            const finalMonthlyRev = validate(finalAnnualRev / 12);
+            const finalAnnualReqExp = validate(calculatedMonthlyRequiredExpense * 12);
+            const finalMonthlyReqExp = validate(calculatedMonthlyRequiredExpense);
+            const finalTargetProfitRate = validate(calculatedTargetProfitRate);
+            
+            // --- 최종 세금/보험료 계산 (누진세율 적용) ---
+            
+            const annualTax = calculateSimulatedIncomeTax(validate(taxBaseIncome)); // 과세표준(TNI) 기준
+            const annualLocalTax = annualTax * 0.1; // 지방소득세 (10%)
+            const totalTaxBurden = annualTax + annualLocalTax; // 총 세금 부담액 (종합소득세 * 1.1)
+            
+            const annualPension = validate(taxBaseIncome * 0.045); // 임의 4.5% (TNI 기준)
+            const annualInsurance = validate(taxBaseIncome * 0.035); // 임의 3.5% (TNI 기준)
+
+            // Actual Profit Rate is calculated using the PRE-TAX actual net income (ANI)
+            const preTaxProfitRate = (finalAnnualRev !== 0) ? (validate(actualNetIncome) / finalAnnualRev) * 100 : 0;
+            
+            // Target Profit Rate is calculated using the PRE-TAX tax base income (TNI)
+            const targetProfitRateCalculated = (finalAnnualRev !== 0) ? (validate(taxBaseIncome) / finalAnnualRev) * 100 : 0;
+
+
+            // --- 세후 순이익 최종 확정 (사용자 요청 공식 적용) ---
+            // 세후 연 순이익 = 실제 순이익 (ANI) - (종합소득세 * 1.1)
+            const finalAnnualNetIncomePostTax = validate(actualNetIncome - totalTaxBurden);
+            const finalMonthlyNetIncomePostTax = validate(finalAnnualNetIncomePostTax / 12);
+            
+            return {
+                annualRev: finalAnnualRev,
+                monthlyRev: finalMonthlyRev,
+                annualExp: annualExp,
+                monthlyExp: monthlyExpense,
+                annualReqExp: finalAnnualReqExp,
+                monthlyReqExp: finalMonthlyReqExp,
+                actualProfitRate: validate(preTaxProfitRate), // 실제 순이익 / 연매출 (항상 0 이상)
+                targetProfitRate: validate(targetProfitRateCalculated), // 목표 순이익 / 연매출 (항상 0 이상)
+                annualNetIncome: finalAnnualNetIncomePostTax, // UI에 표시되는 최종 세후 순이익
+                monthlyNetIncome: finalMonthlyNetIncomePostTax,
+                annualTax: annualTax, // 종합소득세 (지방세 제외)
+                monthlyTax: annualTax / 12,
+                annualPension: annualPension,
+                monthlyPension: annualPension / 12,
+                annualInsurance: annualInsurance,
+                monthlyInsurance: annualInsurance / 12,
+            };
+        };
+
+
+        // --- Constants and State Initialization ---
+        
+        const EMPTY_INPUTS = {
+            annualRevenue: 0,
+            monthlyExpense: 0,
+            monthlyRequiredExpense: 0,
+            targetProfitRate: 0,
+            afterTaxNetIncome: 0,
+        };
+        
         // --- State Management (using a global object to simulate state) ---
         let state = {
             calculationMode: 'mode1',
-            inputs: {
-                annualRevenue: 100000000,
-                monthlyExpense: 5000000,
-                monthlyRequiredExpense: 2000000,
-                targetProfitRate: 35,
-                afterTaxNetIncome: 0,
-            },
-            scenarios: [
-                { 
-                    id: 1, 
-                    mode: '1. 연매출 & 세후순이익', 
-                    annualRev: 120000000, 
-                    monthlyRev: 10000000,
-                    annualExp: 60000000,
-                    monthlyExp: 5000000,
-                    annualReqExp: 24000000,
-                    monthlyReqExp: 2000000, 
-                    actualProfitRate: 32.5, 
-                    targetProfitRate: 35.0, 
-                    annualNetIncome: 42000000,
-                    monthlyNetIncome: 3500000, 
-                    annualTax: 6982584,
-                    monthlyTax: 581882,
-                    annualPension: 2400000, 
-                    monthlyPension: 200000, 
-                    annualInsurance: 581880, 
-                    monthlyInsurance: 48490 
-                },
-            ],
+            inputs: {...EMPTY_INPUTS}, // Set all inputs to zero initially
+            // lastCalculatedResults 초기화 시 actualProfitRate가 0.0으로 명확히 설정되도록 calculateResults 사용
+            lastCalculatedResults: calculateResults(EMPTY_INPUTS, 'mode1'), 
+            scenarios: [], // Clear default scenarios
             simulationModes: [
                 { id: 'mode1', label: '1. 연매출 & 세후순이익 산출', desc: '월지출, 월필요경비, 목표소득률을 기반으로 연매출/순이익을 역산합니다.', icon: '📈' },
                 { id: 'mode2', label: '2. 연매출 & 목표소득률 산출', desc: '매출과 소득률을 입력하여 순이익을 계산합니다.', icon: '📊' },
@@ -77,22 +237,6 @@
             // DOM Elements cache for performance optimization
             domRefs: {}
         };
-
-        const INITIAL_INPUTS = {
-            annualRevenue: 100000000,
-            monthlyExpense: 5000000,
-            monthlyRequiredExpense: 2000000,
-            targetProfitRate: 35,
-            afterTaxNetIncome: 0,
-        };
-
-        const EMPTY_INPUTS = {
-            annualRevenue: 0,
-            monthlyExpense: 0,
-            monthlyRequiredExpense: 0,
-            targetProfitRate: 0,
-            afterTaxNetIncome: 0,
-        };
         
         // --- Helper Functions ---
         const formatCurrency = (val) => {
@@ -109,25 +253,6 @@
             
             return displayValue;
         };
-
-        // --- 누진세율을 이용한 종합소득세 계산 함수 ---
-        // '세전 순이익'을 과세표준으로 가정하여 세금을 계산합니다.
-        const calculateSimulatedIncomeTax = (taxableIncome) => {
-            const tb = Math.max(0, Math.floor(taxableIncome));
-            let tax = 0;
-            
-            if (tb <= 14_000_000)      { tax = tb * 0.06; }
-            else if (tb <= 50_000_000) { tax = tb * 0.15 - 1_260_000; }
-            else if (tb <= 88_000_000) { tax = tb * 0.24 - 5_760_000; }
-            else if (tb <= 150_000_000){ tax = tb * 0.35 - 15_440_000; }
-            else if (tb <= 300_000_000){ tax = tb * 0.38 - 19_940_000; }
-            else if (tb <= 500_000_000){ tax = tb * 0.40 - 25_940_000; }
-            else if (tb <= 1_000_000_000){ tax = tb * 0.42 - 35_940_000; }
-            else { tax = tb * 0.45 - 65_940_000; }
-            
-            return Math.max(0, Math.floor(tax)); 
-        };
-        // --- End of Tax Calculation Function ---
 
         // --- 입력 필드 비활성화 여부 판단 함수 ---
         const isInputDisabled = (fieldName) => {
@@ -160,176 +285,13 @@
             }
         };
 
-        // --- Calculation Logic (Core) ---
-        const calculateResults = (inputs, mode) => {
-            let { annualRevenue, monthlyExpense, monthlyRequiredExpense, targetProfitRate, afterTaxNetIncome } = inputs;
-            
-            const annualExp = monthlyExpense * 12; // 연간 고정 지출 (월지출 * 12)
-            const annualReqExpInput = monthlyRequiredExpense * 12; // 연간 필요 경비 (입력)
-
-            let calculatedAnnualRevenue = annualRevenue;
-            let calculatedMonthlyRequiredExpense = monthlyRequiredExpense;
-            let calculatedTargetProfitRate = targetProfitRate;
-            
-            // DUMMY_TAX_RATE는 Mode 3, 5의 역산 과정에 사용됨
-            const DUMMY_TAX_RATE = 0.15; 
-            
-            let actualNetIncome = 0; // 실제 순이익 (연매출 - 월지출*12)
-            let taxBaseIncome = 0; // 목표 순이익 (실제 순이익 - 월필요경비*12), 과세표준으로 사용
-
-            switch (mode) {
-                // Mode 1: 입력(ME, MRE, TPR), 출력(AR, MTNI)
-                case 'mode1':
-                    const totalExpenseInput = annualExp + annualReqExpInput; // 총 연간 경비 (고정+필요)
-                    const profitRatioComplement = (1 - targetProfitRate / 100);
-
-                    // 1. AR = 총 경비 / (1 - 목표소득률)
-                    if (profitRatioComplement > 0) {
-                        calculatedAnnualRevenue = totalExpenseInput / profitRatioComplement;
-                    } else {
-                        calculatedAnnualRevenue = 0;
-                    }
-                    
-                    // 2. 실제 순이익 (ANI) = AR - 월지출*12
-                    actualNetIncome = calculatedAnnualRevenue - annualExp;
-                    
-                    // 3. 과세표준 (TNI) = ANI - 월필요경비*12
-                    taxBaseIncome = actualNetIncome - annualReqExpInput;
-                    
-                    calculatedMonthlyRequiredExpense = monthlyRequiredExpense;
-                    calculatedTargetProfitRate = targetProfitRate;
-                    break;
-                    
-                // Mode 2: 입력(AR, ME, MRE), 출력(AR, TPR)
-                case 'mode2':
-                    // 1. 실제 순이익 (ANI) = AR - 월지출*12
-                    actualNetIncome = annualRevenue - annualExp;
-                    
-                    // 2. 과세표준 (TNI) = ANI - 월필요경비*12
-                    taxBaseIncome = actualNetIncome - annualReqExpInput;
-                    
-                    // 3. 목표소득률 (TPR) = TNI / AR
-                    calculatedTargetProfitRate = (taxBaseIncome / calculatedAnnualRevenue) * 100;
-
-                    calculatedMonthlyRequiredExpense = monthlyRequiredExpense;
-                    break;
-                
-                // Mode 3: 입력(ME, TPR, MTNI), 출력(AR, MRE) - 역산 필요
-                case 'mode3':
-                    // 목표 세후월순이익 (MTNI)가 없으므로, afterTaxNetIncome은 0으로 가정. 
-                    // 이 모드는 AR과 MRE를 산출해야 하므로 입력값 (AR, ME, MTNI) 중 MTNI가 필요
-                    // 이 모드의 desc에 따르면 AR과 MRE를 산출하지 않음: '매출과 필요경비를 입력하여 목표 소득률을 진단합니다.'
-                    // 그러나 React 버전의 isInputDisabled를 따름 (출력: AR, MRE)
-                    
-                    // 목표 세전 순이익 (TNI) = MTNI를 임의세율로 역산한 값
-                    const targetTNI_M3 = afterTaxNetIncome * 12 / (1 - DUMMY_TAX_RATE);
-                    
-                    const actualNetIncome_M3 = annualRevenue - annualExp;
-                    
-                    // MRE = (ANI - TNI) / 12
-                    calculatedMonthlyRequiredExpense = (actualNetIncome_M3 - targetTNI_M3) / 12;
-
-                    calculatedTargetProfitRate = targetProfitRate;
-                    
-                    // ANI (실제 순이익)와 TNI (과세표준) 계산
-                    actualNetIncome = actualNetIncome_M3;
-                    taxBaseIncome = targetTNI_M3;
-                    break;
-                    
-                // Mode 4: 입력(AR, ME, TPR), 출력(MRE, MTNI)
-                case 'mode4':
-                    // 1. 실제 순이익 (ANI) = AR - 월지출*12
-                    actualNetIncome = annualRevenue - annualExp;
-                    
-                    // 2. 과세표준 (TNI) = AR * TPR (목표 소득률 기반)
-                    taxBaseIncome = annualRevenue * (targetProfitRate / 100);
-                    
-                    // 3. 월필요경비 (MRE) = (ANI - TNI) / 12
-                    calculatedMonthlyRequiredExpense = (actualNetIncome - taxBaseIncome) / 12;
-                    
-                    calculatedAnnualRevenue = annualRevenue;
-                    calculatedTargetProfitRate = targetProfitRate;
-                    break;
-                    
-                // Mode 5: 입력(AR, ME, MTNI), 출력(MRE, TPR)
-                case 'mode5':
-                    // 목표 세전 순이익 (TNI) = MTNI를 임의세율로 역산한 값
-                    const targetTNI_M5 = afterTaxNetIncome * 12 / (1 - DUMMY_TAX_RATE);
-                    
-                    // 1. 실제 순이익 (ANI) = AR - 월지출*12
-                    actualNetIncome = annualRevenue - annualExp;
-                    
-                    // 2. 월필요경비 (MRE) = (ANI - TNI) / 12
-                    calculatedMonthlyRequiredExpense = (actualNetIncome - targetTNI_M5) / 12;
-                    
-                    // 3. 목표소득률 (TPR) = TNI / AR
-                    calculatedTargetProfitRate = (targetTNI_M5 / calculatedAnnualRevenue) * 100;
-
-                    calculatedAnnualRevenue = annualRevenue;
-                    break;
-                default:
-                    taxBaseIncome = 0;
-                    break;
-            }
-            
-            const finalAnnualRev = calculatedAnnualRevenue;
-            const finalMonthlyRev = finalAnnualRev / 12;
-            const finalAnnualReqExp = calculatedMonthlyRequiredExpense * 12;
-            const finalMonthlyReqExp = calculatedMonthlyRequiredExpense;
-            const finalTargetProfitRate = calculatedTargetProfitRate;
-            
-            // --- 최종 세금/보험료 계산 (누진세율 적용) ---
-            
-            const annualTax = calculateSimulatedIncomeTax(taxBaseIncome); // 과세표준(TNI) 기준
-            const annualLocalTax = annualTax * 0.1; // 지방소득세 (10%)
-            const totalTaxBurden = annualTax + annualLocalTax; // 총 세금 부담액 (종합소득세 * 1.1)
-            
-            const annualPension = taxBaseIncome * 0.045; // 임의 4.5% (TNI 기준)
-            const annualInsurance = taxBaseIncome * 0.035; // 임의 3.5% (TNI 기준)
-
-            // Actual Profit Rate is calculated using the PRE-TAX actual net income (ANI)
-            const preTaxProfitRate = finalAnnualRev > 0 ? (actualNetIncome / finalAnnualRev) * 100 : 0;
-            
-            // Target Profit Rate is calculated using the PRE-TAX tax base income (TNI)
-            const targetProfitRateCalculated = finalAnnualRev > 0 ? (taxBaseIncome / finalAnnualRev) * 100 : 0;
-
-
-            // --- 세후 순이익 최종 확정 (사용자 요청 공식 적용) ---
-            // 세후 연 순이익 = 실제 순이익 (ANI) - (종합소득세 * 1.1)
-            const finalAnnualNetIncomePostTax = actualNetIncome - totalTaxBurden;
-            const finalMonthlyNetIncomePostTax = finalAnnualNetIncomePostTax / 12;
-            
-            // 최종적으로 UI에 표시할 순이익률은 목표소득률(TNI/AR)이 아니라 실제 순이익(ANI/AR)이 되어야 합니다.
-            // 하지만 시나리오 테이블에는 목표소득률(TPR)이 표시되어야 하므로 actualProfitRate는 ANI 기준, targetProfitRate는 TNI/AR 기준으로 사용합니다.
-
-
-            return {
-                annualRev: finalAnnualRev,
-                monthlyRev: finalMonthlyRev,
-                annualExp: annualExp,
-                monthlyExp: monthlyExpense,
-                annualReqExp: finalAnnualReqExp,
-                monthlyReqExp: finalMonthlyReqExp,
-                actualProfitRate: preTaxProfitRate, // 실제 순이익 / 연매출
-                targetProfitRate: targetProfitRateCalculated, // 목표 순이익 / 연매출 (과세표준 소득률)
-                annualNetIncome: finalAnnualNetIncomePostTax, // UI에 표시되는 최종 세후 순이익
-                monthlyNetIncome: finalMonthlyNetIncomePostTax,
-                annualTax: annualTax, // 종합소득세 (지방세 제외)
-                monthlyTax: annualTax / 12,
-                annualPension: annualPension,
-                monthlyPension: annualPension / 12,
-                annualInsurance: annualInsurance,
-                monthlyInsurance: annualInsurance / 12,
-            };
-        };
-
 
         // --- Render Functions ---
         
         // Dynamic Result Card Generator
         const createDynamicResultCard = (title, annual, monthly, isPercentage, colorClass, icon) => {
-            const annualValue = isPercentage ? (annual?.toFixed(1) || 0) + '%' : (typeof annual === 'number' ? formatCurrency(annual) : annual);
-            const monthlyValue = typeof monthly === 'number' ? formatCurrency(monthly) : monthly;
+            const annualValue = isPercentage ? (annual?.toFixed(1) || 0) + '%' : (typeof annual === 'number' ? formatCurrency(Math.round(annual)) : annual);
+            const monthlyValue = typeof monthly === 'number' ? formatCurrency(Math.round(monthly)) : monthly;
             
             return `
                 <div class="bg-white rounded-xl p-5 shadow-sm border border-slate-200 relative overflow-hidden">
@@ -375,7 +337,7 @@
                         <div class="space-y-3">
                             <div class="flex justify-between items-center border-b border-slate-100 pb-2">
                                 <span class="text-xs text-slate-400">실제소득률</span>
-                                <span class="text-lg font-bold text-indigo-600">${value1}</span>
+                                <span class="text-lg font-bold text-slate-800">${value1}</span> <!-- 색상 변경: text-indigo-600 -> text-slate-800 -->
                             </div>
                             <div class="flex justify-between items-center">
                                 <span class="text-xs text-slate-400">목표소득률</span>
@@ -411,7 +373,8 @@
 
         // Dashboard Rendering
         const renderDashboard = () => {
-            const currentResults = calculateResults(state.inputs, state.calculationMode);
+            // Dashboard는 lastCalculatedResults에 의존합니다.
+            const currentResults = state.lastCalculatedResults;
             const { annualRev, monthlyRev, annualReqExp, monthlyReqExp, targetProfitRate, annualNetIncome, monthlyNetIncome, actualProfitRate, annualTax } = currentResults;
 
             let card1 = '';
@@ -450,19 +413,25 @@
             
             const cardsHtml = card1 + card2;
             
-            // 소득률 표기를 위한 값
-            const actualRateFormatted = `${(actualProfitRate).toFixed(1)}%`;
-            const targetRateFormatted = `${(targetProfitRate).toFixed(1)}%`;
+            // 소득률 표기를 위한 값 (lastCalculatedResults 사용)
+            
+            // **BUG FIX: Number.isFinite 체크를 통해 안전하게 0.0%로 기본값 설정**
+            const formatRate = (rate) => {
+                const numericRate = parseFloat(rate);
+                return (Number.isFinite(numericRate) ? numericRate : 0).toFixed(1);
+            };
+            
+            const actualRateFormatted = `${formatRate(actualProfitRate)}%`;
+            const targetRateFormatted = `${formatRate(targetProfitRate)}%`;
 
             const fixedCardsHtml = `
                 ${createFixedResultCard(
                     "소득률", // 명칭 변경
-                    actualRateFormatted, // 실제소득률 (ANI/AR)
-                    null, 
-                    null,
-                    targetRateFormatted, // 목표소득률 (TNI/AR)
-                    state.iconMap.PieChart, 
-                    "text-indigo-600"
+                    null, // value1Label (Not used)
+                    actualRateFormatted, // value1 (실제소득률)
+                    null, // value2Label (Not used)
+                    targetRateFormatted, // value2 (목표소득률)
+                    state.iconMap.PieChart 
                 )}
                 ${createFixedResultCard(
                     "종합소득세", 
@@ -476,10 +445,12 @@
 
             // Insight Calculation for Alert Box
             const industryAvg = 40;
-            const diff = industryAvg - (actualProfitRate || 0);
+            // actualProfitRate는 이미 Number.isFinite 검사를 거쳤으므로 안전하게 사용
+            const currentActualRate = actualProfitRate;
+            const diff = industryAvg - currentActualRate;
             const diffText = diff > 0 ? `낮습니다` : `높습니다`;
             const insightText = `
-                현재 소득률(<strong>${actualProfitRate.toFixed(1)}%</strong>)은 동종 업계 평균(${industryAvg}%) 대비 <strong>${Math.abs(diff).toFixed(1)}%</strong> ${diffText}. 
+                현재 소득률(<strong>${currentActualRate.toFixed(1)}%</strong>)은 동종 업계 평균(${industryAvg}%) 대비 <strong>${Math.abs(diff).toFixed(1)}%</strong> ${diffText}. 
                 <br/>
                 필요경비를 <strong>₩${formatCompactCurrency(currentResults.monthlyReqExp)}</strong>으로 유지할 경우, 목표 소득률 달성을 위해 연매출 <strong>₩${formatCompactCurrency(currentResults.annualRev)}</strong>이 필요합니다.
             `;
@@ -519,10 +490,10 @@
                             
                             <!-- 소득률 (실제/목표) - 파란색 계열, % 추가, 간격 넓힘 (px-4) -->
                             <td class="px-4 py-3 text-center text-blue-700 font-bold bg-blue-50/30 border-r border-slate-100">
-                                ${item.actualProfitRate?.toFixed(1)}%
+                                ${(item.actualProfitRate).toFixed(1)}%
                             </td>
                             <td class="px-4 py-3 text-center text-blue-600 bg-blue-50/30 border-r border-slate-100">
-                                ${item.targetProfitRate?.toFixed(1)}%
+                                ${(item.targetProfitRate).toFixed(1)}%
                             </td>
 
                             <!-- 매출 - 회색 계열 -->
@@ -567,6 +538,8 @@
         // Input Form Update Logic
         const updateInputForm = () => {
             const inputs = state.inputs;
+            // 입력 폼에 표시되는 결과는 lastCalculatedResults에 의존합니다.
+            const currentResults = state.lastCalculatedResults; 
             
             // DOM Refs access
             const { 
@@ -575,52 +548,72 @@
             } = state.domRefs;
 
             // 1. Update input field values
-            annualRevenueInput.value = inputs.annualRevenue === 0 ? '' : inputs.annualRevenue.toLocaleString();
-            monthlyExpenseInput.value = inputs.monthlyExpense === 0 ? '' : inputs.monthlyExpense.toLocaleString();
-            monthlyRequiredExpenseInput.value = inputs.monthlyRequiredExpense === 0 ? '' : inputs.monthlyRequiredExpense.toLocaleString();
-            targetProfitRateInput.value = inputs.targetProfitRate === 0 ? '' : inputs.targetProfitRate;
-            afterTaxNetIncomeInput.value = inputs.afterTaxNetIncome === 0 ? '' : inputs.afterTaxNetIncome.toLocaleString();
-
-            // 2. Handle disabled state and label visibility
             [
-                { name: 'annualRevenue', input: annualRevenueInput }, 
-                { name: 'monthlyRequiredExpense', input: monthlyRequiredExpenseInput }, 
-                { name: 'targetProfitRate', input: targetProfitRateInput }, 
-                { name: 'afterTaxNetIncome', input: afterTaxNetIncomeInput }
-            ].forEach(({ name, input }) => {
+                { name: 'annualRevenue', input: annualRevenueInput, isCurrency: true, resultName: 'annualRev' }, 
+                { name: 'monthlyExpense', input: monthlyExpenseInput, isCurrency: true, resultName: 'monthlyExp' },
+                { name: 'monthlyRequiredExpense', input: monthlyRequiredExpenseInput, isCurrency: true, resultName: 'monthlyReqExp' }, 
+                { name: 'targetProfitRate', input: targetProfitRateInput, isCurrency: false, resultName: 'targetProfitRate' }, 
+                { name: 'afterTaxNetIncome', input: afterTaxNetIncomeInput, isCurrency: true, resultName: 'monthlyNetIncome' }
+            ].forEach(({ name, input, isCurrency, resultName }) => {
                 const isDisabled = isInputDisabled(name);
                 
-                // Find the status label span (which is the last child of the label element)
+                // Find the status label span 
                 const label = input.closest('div.space-y-5 > div').querySelector('label');
                 const statusLabelSpan = label ? label.querySelector('span') : null;
 
-                // Input field disable status update: 이 부분은 유지되어야 하지만, 사용자의 입력이 가능해야 하므로,
-                // disabled 속성 자체는 제거하고, 시각적인 '자동 산출됨' 표시만 유지합니다. 
-                // 대신 input 값을 입력하면 바로 state에 반영됩니다.
-                // input.disabled = isDisabled; // <- 이 부분을 주석 처리하여 입력 가능하게 유지
-                input.placeholder = isDisabled ? "자동 계산" : "0";
-                
-                // Toggle classes for styling (시각적으로는 비활성화처럼 보이게 유지)
-                const baseClasses = 'bg-white border-slate-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500';
-                const disabledClasses = 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed';
-                
-                input.classList.remove(...baseClasses.split(' '), ...disabledClasses.split(' '));
+                let valueToDisplay = inputs[name];
 
                 if (isDisabled) {
+                    // 필드가 산출값일 경우, lastCalculatedResults의 결과를 표시합니다.
+                    
+                    // 1. 값 설정 (NaN/0 방지 및 0일 때 '0' 명시)
+                    let resultValue = currentResults[resultName];
+
+                    let formattedValue;
+                    if (isCurrency) {
+                        const value = Math.round(resultValue);
+                        // NaN 또는 유효하지 않으면 "0", 아니면 콤마 포맷
+                        formattedValue = Number.isFinite(value) ? value.toLocaleString() : '0'; 
+                    } else if (name === 'targetProfitRate') {
+                         // 소득률은 소수점 두 자리까지 표시
+                        formattedValue = Number.isFinite(resultValue) ? resultValue.toFixed(2) : '0.00';
+                    }
+                    input.value = formattedValue; // <--- 계산 결과 강제 할당
+                    
+                    // 2. Styling (회색 음영)
+                    const disabledClasses = 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed';
+                    const activeClasses = 'bg-white border-slate-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500';
+
+                    // Remove active styles
+                    input.classList.remove(...activeClasses.split(' ')); 
+                    // Add disabled styles
                     input.classList.add(...disabledClasses.split(' '));
+
+                    // 3. Status label
                     if (statusLabelSpan) statusLabelSpan.style.display = 'inline';
-                    input.disabled = false; // 강제로 활성화 상태를 유지하여 입력 가능하게 함
+                    
                 } else {
+                    // 필드가 입력값일 경우, 사용자가 입력한 값(state.inputs[name])을 표시합니다.
+                    if (isCurrency) {
+                        // 금액 0일 때 공란으로 유지 (사용자 입력 경험)
+                        input.value = valueToDisplay === 0 ? '' : valueToDisplay.toLocaleString();
+                    } else {
+                        // 숫자 0일 때 공란으로 유지
+                        input.value = valueToDisplay === 0 ? '' : valueToDisplay;
+                    }
+
+                    // Styling for input fields (visually active)
+                    const baseClasses = 'bg-white border-slate-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500';
+                    const disabledClasses = 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed';
+                    input.classList.remove(...disabledClasses.split(' '));
                     input.classList.add(...baseClasses.split(' '));
                     if (statusLabelSpan) statusLabelSpan.style.display = 'none';
-                    input.disabled = false;
                 }
+                
+                input.placeholder = isDisabled ? "자동 계산" : "0";
+                // 모든 필드는 입력 가능해야 하므로 disabled=false 유지
+                input.disabled = false;
             });
-            
-            // 3. 월지출 (monthlyExpense)는 항상 입력 가능하므로 별도 처리
-            monthlyExpenseInput.disabled = false;
-            monthlyExpenseInput.classList.remove('bg-slate-100', 'border-slate-200', 'text-slate-400', 'cursor-not-allowed');
-            monthlyExpenseInput.classList.add('bg-white', 'border-slate-300', 'focus:ring-2', 'focus:ring-blue-500', 'focus:border-blue-500');
         };
 
         // Mode Selector Rendering
@@ -688,22 +681,25 @@
             }
 
             if (!isNaN(rawValue)) {
-                // 산출 필드에 값을 입력하면 그 값이 state에 반영되어 calculationResults를 구동시킴
+                // 입력값만 state에 업데이트. Dashboard는 업데이트하지 않음.
                 state.inputs = { ...state.inputs, [name]: rawValue };
-                renderApp();
+                updateInputForm(); // 입력 필드 값만 새로고침 (산출 필드는 그대로 유지)
             }
         };
 
         const handleAddScenario = () => {
-            const newId = state.scenarios.length > 0 ? Math.max(...state.scenarios.map(s => s.id)) + 1 : 1;
+            // 1. 현재 입력값으로 계산
             const results = calculateResults(state.inputs, state.calculationMode);
+            
+            // 2. 계산 결과를 Dashboard와 산출 필드에 반영
+            state.lastCalculatedResults = results;
 
-            const newScenario = {
-                id: newId,
-                mode: getModeLabel(state.calculationMode),
-                ...results,
-            };
+            // 3. 시나리오 테이블에 추가
+            const newId = state.scenarios.length > 0 ? Math.max(...state.scenarios.map(s => s.id)) + 1 : 1;
+            const newScenario = { id: newId, mode: getModeLabel(state.calculationMode), ...results };
             state.scenarios = [...state.scenarios, newScenario];
+
+            // 4. 전체 렌더링 (Dashboard, Form, Table 업데이트)
             renderApp();
         };
 
@@ -714,6 +710,7 @@
 
         const handleResetInputs = () => {
             state.inputs = { ...EMPTY_INPUTS };
+            state.lastCalculatedResults = calculateResults(EMPTY_INPUTS, 'mode1'); // Dashboard 초기화
             renderApp();
         };
 
@@ -854,7 +851,7 @@
                         <!-- Buttons Section: Calculate & Reset -->
                         <div class="grid grid-cols-2 gap-3 mt-8 pt-4 border-t border-slate-100">
                             <button id="add-scenario-btn" class="bg-blue-600 hover:bg-blue-700 text-white py-3 rounded-xl font-semibold shadow-lg shadow-blue-200 transition-all flex items-center justify-center gap-2 transform hover:scale-[1.02] active:scale-100">
-                                ➕ 시나리오 추가
+                                🧮 계산하기
                             </button>
                             <button id="reset-inputs-btn" class="bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 py-3 rounded-xl font-semibold transition-all flex items-center justify-center gap-2">
                                 🔄 입력 초기화
