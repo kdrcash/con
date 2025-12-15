@@ -1,954 +1,973 @@
 <!DOCTYPE html>
 <html lang="ko">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pro-Consulting Lab (HTML/JS)</title>
-    <!-- Tailwind CSS CDN -->
-    <script src="https://cdn.tailwindcss.com"></script>
-    <style>
-        /* Custom styles for fixed table headers in a single file */
-        .sticky-col-1 {
-            left: 0;
-            z-index: 20; /* Higher than normal sticky */
-            box-shadow: 2px 0 5px -2px rgba(0, 0, 0, 0.1);
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pro-Consulting Lab (HTML/JS)</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- ✅ SheetJS (Excel Export) -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+  <style>
+    .sticky-col-1 { left: 0; z-index: 20; box-shadow: 2px 0 5px -2px rgba(0,0,0,0.1); }
+    .sticky-col-2 { left: 40px; z-index: 20; box-shadow: 2px 0 5px -2px rgba(0,0,0,0.1); }
+    .table-container { overflow-x: auto; }
+    .sticky-col { position: sticky; }
+  </style>
+
+  <script>
+    /* =========================
+       1) Utils
+    ========================= */
+    const toNum = (v) => {
+      if (v === null || v === undefined) return 0;
+      const s = String(v).replace(/[,\s]/g, '');
+      const n = Number(s);
+      return Number.isFinite(n) ? n : 0;
+    };
+
+    const formatCurrency = (val) =>
+      new Intl.NumberFormat('ko-KR', { style: 'currency', currency: 'KRW' }).format(Math.round(val || 0));
+
+    const formatCompactCurrency = (val) => {
+      const n = Math.round(val || 0);
+      if (!n) return '0';
+      return new Intl.NumberFormat('ko-KR', { style: 'decimal', maximumFractionDigits: 0 }).format(n);
+    };
+
+    const formatRate1 = (v) => {
+      const n = Number(v);
+      return (Number.isFinite(n) ? n : 0).toFixed(1);
+    };
+
+    // ✅ 입력 중에도 콤마 자동 표기 + 커서 위치 최대한 유지
+    const formatNumberInputWithComma = (inputEl) => {
+      const raw = inputEl.value;
+
+      // 숫자/쉼표 외 제거 (음수/소수 필요 없으면 아래 정규식 유지)
+      const digitsOnly = raw.replace(/[^\d]/g, '');
+      // 빈 값 허용
+      if (!digitsOnly) {
+        inputEl.value = '';
+        return;
+      }
+
+      const beforeCaret = raw.slice(0, inputEl.selectionStart || 0);
+      const beforeDigitsCount = beforeCaret.replace(/[^\d]/g, '').length;
+
+      const formatted = Number(digitsOnly).toLocaleString('ko-KR');
+      inputEl.value = formatted;
+
+      // caret 복원: formatted에서 beforeDigitsCount번째 숫자 뒤로 이동
+      let pos = 0;
+      let digitSeen = 0;
+      while (pos < formatted.length) {
+        if (/\d/.test(formatted[pos])) digitSeen++;
+        if (digitSeen >= beforeDigitsCount) { pos++; break; }
+        pos++;
+      }
+      inputEl.setSelectionRange(pos, pos);
+    };
+
+    /* =========================
+       2) Tax / Solver
+    ========================= */
+    const calculateSimulatedIncomeTax = (taxableIncome) => {
+      const tb = Math.max(0, Math.floor(taxableIncome));
+      let tax = 0;
+      if (tb <= 14_000_000) tax = tb * 0.06;
+      else if (tb <= 50_000_000) tax = tb * 0.15 - 1_260_000;
+      else if (tb <= 88_000_000) tax = tb * 0.24 - 5_760_000;
+      else if (tb <= 150_000_000) tax = tb * 0.35 - 15_440_000;
+      else if (tb <= 300_000_000) tax = tb * 0.38 - 19_940_000;
+      else if (tb <= 500_000_000) tax = tb * 0.40 - 25_940_000;
+      else if (tb <= 1_000_000_000) tax = tb * 0.42 - 35_940_000;
+      else tax = tb * 0.45 - 65_940_000;
+      return Math.max(0, Math.floor(tax));
+    };
+
+    const solveTNI = (func, targetValue) => {
+      let low = 0;
+      let high = 100_000_000_000;
+      let mid = 0;
+
+      for (let i = 0; i < 110; i++) {
+        mid = (low + high) / 2;
+        const result = func(mid);
+        if (Math.abs(result - targetValue) < 10) break;
+        if (result < targetValue) low = mid;
+        else high = mid;
+      }
+      return mid;
+    };
+
+    /* =========================
+       3) Core Calculation (순수함수)
+    ========================= */
+    const calculateResults = (inputs, mode) => {
+      const annualRevenue = toNum(inputs.annualRevenue);
+      const monthlyExpense = toNum(inputs.monthlyExpense);
+      const monthlyRequiredExpense = toNum(inputs.monthlyRequiredExpense);
+      const targetProfitRate = toNum(inputs.targetProfitRate);
+      const afterTaxNetIncome = toNum(inputs.afterTaxNetIncome);
+
+      const annualExp = monthlyExpense * 12;
+      const annualReqExpInput = monthlyRequiredExpense * 12;
+      const annualAfterTaxNetIncome = afterTaxNetIncome * 12;
+
+      let calculatedAnnualRevenue = annualRevenue;
+      let calculatedMonthlyRequiredExpense = monthlyRequiredExpense;
+      let calculatedTargetProfitRate = targetProfitRate;
+
+      let actualNetIncome = 0; // ANI = AR - 연지출
+      let taxBaseIncome = 0;   // TNI
+
+      switch (mode) {
+        case 'mode1': {
+          const totalExpenseInput = annualExp + annualReqExpInput;
+          const profitRatioComplement = (1 - targetProfitRate / 100);
+
+          calculatedAnnualRevenue = (profitRatioComplement > 0 && targetProfitRate < 100)
+            ? (totalExpenseInput / profitRatioComplement)
+            : 0;
+
+          actualNetIncome = calculatedAnnualRevenue - annualExp;
+          taxBaseIncome = actualNetIncome - annualReqExpInput;
+
+          calculatedMonthlyRequiredExpense = monthlyRequiredExpense;
+          calculatedTargetProfitRate = targetProfitRate;
+          break;
         }
-        .sticky-col-2 {
-            left: 40px; /* Adjust based on col 1 width */
-            z-index: 20;
-            box-shadow: 2px 0 5px -2px rgba(0, 0, 0, 0.1);
+
+        case 'mode2': {
+          const funcMode2 = (tni) => {
+            const tax = calculateSimulatedIncomeTax(tni);
+            const ani = tni + annualReqExpInput;
+            return ani - (tax * 1.1);
+          };
+
+          taxBaseIncome = solveTNI(funcMode2, annualAfterTaxNetIncome);
+          calculatedAnnualRevenue = taxBaseIncome + annualReqExpInput + annualExp;
+
+          actualNetIncome = calculatedAnnualRevenue - annualExp;
+          calculatedTargetProfitRate = (calculatedAnnualRevenue !== 0)
+            ? (taxBaseIncome / calculatedAnnualRevenue) * 100
+            : 0;
+
+          calculatedMonthlyRequiredExpense = monthlyRequiredExpense;
+          break;
         }
-        .table-container {
-            overflow-x: auto;
-        }
-        
-        /* Apply sticky class to all relevant cells */
-        .sticky-col {
-            position: sticky;
-        }
-    </style>
-    <script>
-        // --- Tax Calculation Helper ---
-        const calculateSimulatedIncomeTax = (taxableIncome) => {
-            const tb = Math.max(0, Math.floor(taxableIncome));
-            let tax = 0;
-            
-            if (tb <= 14_000_000)      { tax = tb * 0.06; }
-            else if (tb <= 50_000_000) { tax = tb * 0.15 - 1_260_000; }
-            else if (tb <= 88_000_000) { tax = tb * 0.24 - 5_760_000; }
-            else if (tb <= 150_000_000){ tax = tb * 0.35 - 15_440_000; }
-            else if (tb <= 300_000_000){ tax = tb * 0.38 - 19_940_000; }
-            else if (tb <= 500_000_000){ tax = tb * 0.40 - 25_940_000; }
-            else if (tb <= 1_000_000_000){ tax = tb * 0.42 - 35_940_000; }
-            else { tax = tb * 0.45 - 65_940_000; }
-            
-            return Math.max(0, Math.floor(tax)); 
-        };
 
-        // --- Utility Function (Global Definition) ---
-        const validate = (val) => Number.isFinite(val) ? val : 0;
-
-        /**
-         * 목표값 찾기 (Binary Search)
-         * f(TNI) = TargetValue 가 되는 TNI를 찾음
-         * func: TNI를 입력받아 계산된 값을 반환하는 함수
-         * targetValue: 목표값
-         */
-        const solveTNI = (func, targetValue) => {
-            let low = 0;
-            let high = 100_000_000_000; // 충분히 큰 값 (1000억)
-            let mid = 0;
-            let foundTNI = 0;
-
-            for (let i = 0; i < 100; i++) { // 최대 100번 반복
-                mid = (low + high) / 2;
-                const result = func(mid);
-                
-                if (Math.abs(result - targetValue) < 10) { // 오차 범위 10원 이내
-                    foundTNI = mid;
-                    break;
-                }
-
-                if (result < targetValue) {
-                    low = mid;
-                } else {
-                    high = mid;
-                }
-            }
-            return mid;
-        };
-
-        // --- Core Calculation Logic ---
-        const calculateResults = (inputs, mode) => {
-            let { annualRevenue, monthlyExpense, monthlyRequiredExpense, targetProfitRate, afterTaxNetIncome } = inputs;
-            
-            const annualExp = monthlyExpense * 12; // 연간 고정 지출 (월지출 * 12)
-            const annualReqExpInput = monthlyRequiredExpense * 12; // 연간 필요 경비 (입력)
-            const annualAfterTaxNetIncome = afterTaxNetIncome * 12; // 세후 연 순이익
-
-            let calculatedAnnualRevenue = annualRevenue;
-            let calculatedMonthlyRequiredExpense = monthlyRequiredExpense;
-            let calculatedTargetProfitRate = targetProfitRate;
-            
-            let actualNetIncome = 0; // 실제 순이익 (연매출 - 월지출*12)
-            let taxBaseIncome = 0; // 목표 순이익 (실제 순이익 - 월필요경비*12), 과세표준으로 사용
-
-            switch (mode) {
-                // Mode 1: 입력(ME, MRE, TPR), 출력(AR, MTNI)
-                case 'mode1': {
-                    const totalExpenseInput = annualExp + annualReqExpInput;
-                    const profitRatioComplement = (1 - targetProfitRate / 100);
-
-                    if (profitRatioComplement > 0 && targetProfitRate < 100) {
-                        calculatedAnnualRevenue = totalExpenseInput / profitRatioComplement;
-                    } else {
-                        calculatedAnnualRevenue = 0;
-                    }
-                    
-                    actualNetIncome = calculatedAnnualRevenue - annualExp;
-                    taxBaseIncome = actualNetIncome - annualReqExpInput;
-                    
-                    calculatedMonthlyRequiredExpense = monthlyRequiredExpense;
-                    calculatedTargetProfitRate = targetProfitRate;
-                    break;
-                }
-                    
-                // Mode 2: 입력(MRE, ME, MTNI), 출력(AR, TPR)
-                // 식: (TNI + MRE_Annual) - Tax(TNI)*1.1 = ATNI
-                case 'mode2': {
-                    const funcMode2 = (tni) => {
-                        const tax = calculateSimulatedIncomeTax(tni);
-                        // ANI = TNI + MRE_Annual
-                        const ani = tni + annualReqExpInput; 
-                        // ATNI = ANI - Tax*1.1
-                        return ani - (tax * 1.1);
-                    };
-
-                    // ATNI가 되도록 하는 TNI 찾기
-                    taxBaseIncome = solveTNI(funcMode2, annualAfterTaxNetIncome);
-                    
-                    // AR = TNI + MRE + ME
-                    calculatedAnnualRevenue = taxBaseIncome + annualReqExpInput + annualExp;
-                    
-                    actualNetIncome = calculatedAnnualRevenue - annualExp;
-                    
-                    calculatedTargetProfitRate = (calculatedAnnualRevenue !== 0) ? (taxBaseIncome / calculatedAnnualRevenue) * 100 : 0;
-                    calculatedMonthlyRequiredExpense = monthlyRequiredExpense;
-                    break;
-                }
-                
-                // Mode 3: 입력(ME, TPR, MTNI), 출력(AR, MRE)
-                // 식: (TNI / TPR) - ME - Tax(TNI)*1.1 = ATNI
-                case 'mode3': {
-                    const tprRatio = targetProfitRate / 100;
-                    
-                    if (tprRatio > 0) {
-                        const funcMode3 = (tni) => {
-                            const tax = calculateSimulatedIncomeTax(tni);
-                            // AR = TNI / TPR
-                            const ar = tni / tprRatio;
-                            // ANI = AR - ME
-                            const ani = ar - annualExp;
-                            // ATNI = ANI - Tax*1.1
-                            return ani - (tax * 1.1);
-                        };
-
-                        taxBaseIncome = solveTNI(funcMode3, annualAfterTaxNetIncome);
-                        
-                        calculatedAnnualRevenue = taxBaseIncome / tprRatio;
-                        actualNetIncome = calculatedAnnualRevenue - annualExp;
-                        // MRE = ANI - TNI
-                        const annualReqExp = actualNetIncome - taxBaseIncome;
-                        calculatedMonthlyRequiredExpense = annualReqExp / 12;
-
-                    } else {
-                        calculatedAnnualRevenue = 0;
-                        calculatedMonthlyRequiredExpense = 0;
-                        taxBaseIncome = 0;
-                        actualNetIncome = 0;
-                    }
-                    calculatedTargetProfitRate = targetProfitRate;
-                    break;
-                }
-                    
-                // Mode 4: 입력(AR, ME, TPR), 출력(MRE, MTNI)
-                case 'mode4': {
-                    actualNetIncome = annualRevenue - annualExp;
-                    // TNI = AR * TPR
-                    taxBaseIncome = annualRevenue * (targetProfitRate / 100);
-                    
-                    // MRE = ANI - TNI
-                    const annualReqExp = actualNetIncome - taxBaseIncome;
-                    calculatedMonthlyRequiredExpense = annualReqExp / 12;
-                    
-                    calculatedAnnualRevenue = annualRevenue;
-                    calculatedTargetProfitRate = targetProfitRate;
-                    break;
-                }
-                    
-                // Mode 5: 입력(AR, ME, MTNI), 출력(MRE, TPR)
-                // 식: (AR - ME) - Tax(TNI)*1.1 = ATNI
-                // Tax(TNI)*1.1 = (AR - ME) - ATNI = ANI - ATNI
-                case 'mode5': {
-                    actualNetIncome = annualRevenue - annualExp;
-                    
-                    // 세금 부담액 목표치
-                    const targetTaxBurden = actualNetIncome - annualAfterTaxNetIncome;
-                    
-                    if (targetTaxBurden > 0) {
-                        const funcMode5 = (tni) => {
-                            return calculateSimulatedIncomeTax(tni) * 1.1;
-                        };
-                        // Tax(TNI)*1.1 = targetTaxBurden 인 TNI 찾기
-                        taxBaseIncome = solveTNI(funcMode5, targetTaxBurden);
-                    } else {
-                        taxBaseIncome = actualNetIncome; // 세금이 없는 경우 (거의 없음)
-                    }
-
-                    // MRE = ANI - TNI
-                    const annualReqExp = actualNetIncome - taxBaseIncome;
-                    calculatedMonthlyRequiredExpense = annualReqExp / 12;
-                    
-                    calculatedTargetProfitRate = (calculatedAnnualRevenue !== 0) ? (taxBaseIncome / calculatedAnnualRevenue) * 100 : 0;
-                    calculatedAnnualRevenue = annualRevenue;
-                    break;
-                }
-                default:
-                    break;
-            }
-            
-            const finalAnnualRev = validate(calculatedAnnualRevenue);
-            const finalMonthlyRev = validate(finalAnnualRev / 12);
-            const finalAnnualReqExp = validate(calculatedMonthlyRequiredExpense * 12);
-            const finalMonthlyReqExp = validate(calculatedMonthlyRequiredExpense);
-            const finalTargetProfitRate = validate(calculatedTargetProfitRate);
-            
-            // --- 최종 세금/보험료 계산 ---
-            const annualTax = calculateSimulatedIncomeTax(validate(taxBaseIncome)); // 과세표준(TNI) 기준
-            const annualLocalTax = annualTax * 0.1; 
-            const totalTaxBurden = annualTax + annualLocalTax;
-            
-            const annualPension = validate(taxBaseIncome * 0.045); 
-            const annualInsurance = validate(taxBaseIncome * 0.035); 
-
-            // Actual Profit Rate = ANI / AR
-            const preTaxProfitRate = (finalAnnualRev !== 0) ? (validate(actualNetIncome) / finalAnnualRev) * 100 : 0;
-            
-            // Target Profit Rate = TNI / AR
-            const targetProfitRateCalculated = (finalAnnualRev !== 0) ? (validate(taxBaseIncome) / finalAnnualRev) * 100 : 0;
-
-            // --- 세후 순이익 최종 확정 ---
-            // ATNI = ANI - TotalTax
-            const finalAnnualNetIncomePostTax = validate(actualNetIncome - totalTaxBurden);
-            const finalMonthlyNetIncomePostTax = validate(finalAnnualNetIncomePostTax / 12);
-            
-            return {
-                annualRev: finalAnnualRev,
-                monthlyRev: finalMonthlyRev,
-                annualExp: annualExp,
-                monthlyExp: monthlyExpense,
-                annualReqExp: finalAnnualReqExp,
-                monthlyReqExp: finalMonthlyReqExp,
-                actualProfitRate: validate(preTaxProfitRate),
-                targetProfitRate: validate(targetProfitRateCalculated), 
-                annualNetIncome: finalAnnualNetIncomePostTax,
-                monthlyNetIncome: finalMonthlyNetIncomePostTax,
-                annualTax: annualTax,
-                monthlyTax: annualTax / 12,
-                annualPension: annualPension,
-                monthlyPension: annualPension / 12,
-                annualInsurance: annualInsurance,
-                monthlyInsurance: annualInsurance / 12,
-            };
-        };
-
-
-        // --- Constants and State Initialization ---
-        
-        const EMPTY_INPUTS = {
-            annualRevenue: 0,
-            monthlyExpense: 0,
-            monthlyRequiredExpense: 0,
-            targetProfitRate: 0,
-            afterTaxNetIncome: 0,
-        };
-        
-        // --- State Management ---
-        let state = {
-            calculationMode: 'mode1',
-            inputs: {...EMPTY_INPUTS},
-            lastCalculatedResults: calculateResults(EMPTY_INPUTS, 'mode1'), 
-            scenarios: [], 
-            simulationModes: [
-                { id: 'mode1', label: '1. 연매출 & 세후순이익 산출', desc: '월지출, 월필요경비, 목표소득률을 기반으로 연매출/순이익을 역산합니다.', icon: '📈' },
-                { id: 'mode2', label: '2. 연매출 & 목표소득률 산출', desc: '매출과 소득률을 입력하여 순이익을 계산합니다.', icon: '📊' },
-                { id: 'mode3', label: '3. 연매출 & 필요경비 산출', desc: '매출과 필요경비를 입력하여 목표 소득률을 진단합니다.', icon: '🧮' },
-                { id: 'mode4', label: '4. 필요경비 & 세후순이익 산출', desc: '필요경비와 순이익을 통해 예상 매출을 계산합니다.', icon: '💰' },
-                { id: 'mode5', label: '5. 필요경비 & 목표소득률 산출', desc: '필요경비와 소득률을 통해 예상 매출/순이익을 계산합니다.', icon: '🎯' }
-            ],
-            iconMap: {
-                'TrendingUp': '📈', 'PieChart': '📊', 'Calculator': '🧮',
-                'DollarSign': '💰', 'Target': '🎯', 'Activity': '💡',
-                'FileText': '📄', 'RotateCcw': '🔄', 'Plus': '➕',
-                'Trash2': '🗑️', 'Save': '💾', 'ArrowRightCircle': '➡️'
-            },
-            domRefs: {}
-        };
-        
-        // --- Helper Functions ---
-        const formatCurrency = (val) => {
-            return new Intl.NumberFormat('ko-KR', { style: 'currency', currency: 'KRW' }).format(val);
-        };
-        
-        const formatCompactCurrency = (val) => {
-            if (val === 0) return '0';
-            const displayValue = new Intl.NumberFormat('ko-KR', { 
-                style: 'decimal', 
-                maximumFractionDigits: 0 
-            }).format(val);
-            return displayValue;
-        };
-
-        // --- 입력 필드 비활성화 여부 판단 함수 ---
-        const isInputDisabled = (fieldName) => {
-            const mode = state.calculationMode;
-            switch (mode) {
-                case 'mode1': return fieldName === 'annualRevenue' || fieldName === 'afterTaxNetIncome';
-                case 'mode2': return fieldName === 'annualRevenue' || fieldName === 'targetProfitRate';
-                case 'mode3': return fieldName === 'annualRevenue' || fieldName === 'monthlyRequiredExpense';
-                case 'mode4': return fieldName === 'monthlyRequiredExpense' || fieldName === 'afterTaxNetIncome';
-                case 'mode5': return fieldName === 'monthlyRequiredExpense' || fieldName === 'targetProfitRate';
-                default: return false;
-            }
-        };
-
-        const getModeLabel = (mode) => {
-            switch(mode) {
-                case 'mode1': return '1. 연매출 & 세후순이익 산출';
-                case 'mode2': return '2. 연매출 & 목표소득률 산출';
-                case 'mode3': return '3. 연매출 & 필요경비 산출';
-                case 'mode4': return '4. 필요경비 & 세후순이익 산출';
-                case 'mode5': return '5. 필요경비 & 목표소득률 산출';
-                default: return '';
-            }
-        };
-
-
-        // --- Render Functions ---
-        
-        // Dynamic Result Card Generator
-        const createDynamicResultCard = (title, annual, monthly, isPercentage, colorClass, icon) => {
-            const annualValue = isPercentage ? (annual?.toFixed(1) || 0) + '%' : (typeof annual === 'number' ? formatCurrency(Math.round(annual)) : annual);
-            const monthlyValue = typeof monthly === 'number' ? formatCurrency(Math.round(monthly)) : monthly;
-            
-            return `
-                <div class="bg-white rounded-xl p-5 shadow-sm border border-slate-200 relative overflow-hidden">
-                    <div class="absolute top-0 right-0 p-2 rounded-bl-xl opacity-10 ${colorClass}">
-                        ${icon}
-                    </div>
-                    <h4 class="text-sm font-bold text-slate-500 mb-3 flex items-center gap-2">
-                        <span class="text-slate-400">${icon}</span> ${title} <span class="text-xs font-normal text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full">산출값</span>
-                    </h4>
-                    
-                    <div class="space-y-3">
-                        ${!isPercentage ? `
-                            <div class="flex justify-between items-end border-b border-slate-100 pb-2">
-                                <span class="text-xs text-slate-400">연간</span>
-                                <span class="text-lg font-bold text-slate-800">${annualValue}</span>
-                            </div>
-                            <div class="flex justify-between items-end">
-                                <span class="text-xs text-slate-400">월간</span>
-                                <span class="text-lg font-bold text-slate-800">${monthlyValue}</span>
-                            </div>
-                        ` : `
-                            <div class="flex justify-between items-end pt-2">
-                                <span class="text-xs text-slate-400">목표 비율</span>
-                                <span class="text-2xl font-bold text-slate-800">${annualValue}</span>
-                            </div>
-                        `}
-                    </div>
-                </div>
-            `;
-        };
-
-        // Fixed Result Card Generator
-        const createFixedResultCard = (title, value1Label, value1, value2Label, value2, icon, colorText = "text-slate-800") => {
-            if (title === '소득률') {
-                 return `
-                    <div class="bg-slate-50 rounded-xl p-5 border border-slate-200">
-                        <h4 class="text-sm font-bold text-slate-500 mb-3 flex items-center gap-2">
-                            <span class="text-slate-400">${icon}</span> ${title} <span class="text-xs font-normal text-slate-400 bg-slate-200 px-2 py-0.5 rounded-full">고정</span>
-                        </h4>
-                        <div class="space-y-3">
-                            <div class="flex justify-between items-center border-b border-slate-100 pb-2">
-                                <span class="text-xs text-slate-400">실제소득률</span>
-                                <span class="text-lg font-bold text-slate-800">${value1}</span>
-                            </div>
-                            <div class="flex justify-between items-center">
-                                <span class="text-xs text-slate-400">목표소득률</span>
-                                <span class="text-lg font-bold text-slate-800">${value2}</span>
-                            </div>
-                        </div>
-                    </div>
-                 `;
-            } else {
-                 return `
-                    <div class="bg-slate-50 rounded-xl p-5 border border-slate-200">
-                        <h4 class="text-sm font-bold text-slate-500 mb-3 flex items-center gap-2">
-                            <span class="text-slate-400">${icon}</span> ${title} <span class="text-xs font-normal text-slate-400 bg-slate-200 px-2 py-0.5 rounded-full">고정</span>
-                        </h4>
-                        <div class="space-y-3">
-                            <div class="flex justify-between items-center border-b border-slate-100 pb-2">
-                                <span class="text-xs text-slate-400">${value1Label}</span>
-                                <span class="text-lg font-bold ${colorText}">${value1}</span>
-                            </div>
-                            ${value2Label ? `
-                            <div class="flex justify-between items-center">
-                                    <span class="text-xs text-slate-400">${value2Label}</span>
-                                    <span class="text-lg font-bold ${colorText}">${value2}</span>
-                                </div>
-                            ` : ''}
-                        </div>
-                    </div>
-                 `;
-            }
-        };
-
-        // Dashboard Rendering
-        const renderDashboard = () => {
-            const currentResults = state.lastCalculatedResults;
-            const { annualRev, monthlyRev, annualReqExp, monthlyReqExp, targetProfitRate, annualNetIncome, monthlyNetIncome, actualProfitRate, annualTax } = currentResults;
-
-            let card1 = '';
-            let card2 = '';
-
-            switch (state.calculationMode) {
-                case 'mode1':
-                    card1 = createDynamicResultCard("예상 매출", annualRev, monthlyRev, false, "bg-emerald-500", state.iconMap.TrendingUp);
-                    card2 = createDynamicResultCard("예상 세후순이익", annualNetIncome, monthlyNetIncome, false, "bg-blue-500", state.iconMap.DollarSign);
-                    break;
-                case 'mode2':
-                    card1 = createDynamicResultCard("예상 매출", annualRev, monthlyRev, false, "bg-emerald-500", state.iconMap.TrendingUp);
-                    card2 = createDynamicResultCard("목표소득률", targetProfitRate, 0, true, "bg-purple-500", state.iconMap.Target);
-                    break;
-                case 'mode3':
-                    card1 = createDynamicResultCard("예상 매출", annualRev, monthlyRev, false, "bg-emerald-500", state.iconMap.TrendingUp);
-                    card2 = createDynamicResultCard("필요경비", annualReqExp, monthlyReqExp, false, "bg-orange-500", state.iconMap.Calculator);
-                    break;
-                case 'mode4':
-                    card1 = createDynamicResultCard("필요경비", annualReqExp, monthlyReqExp, false, "bg-orange-500", state.iconMap.Calculator);
-                    card2 = createDynamicResultCard("예상 세후순이익", annualNetIncome, monthlyNetIncome, false, "bg-blue-500", state.iconMap.DollarSign);
-                    break;
-                case 'mode5':
-                    card1 = createDynamicResultCard("필요경비", annualReqExp, monthlyReqExp, false, "bg-orange-500", state.iconMap.Calculator);
-                    card2 = createDynamicResultCard("목표소득률", targetProfitRate, 0, true, "bg-purple-500", state.iconMap.Target);
-                    break;
-                default:
-                    card1 = createDynamicResultCard("예상 매출", annualRev, monthlyRev, false, "bg-emerald-500", state.iconMap.TrendingUp);
-                    card2 = createDynamicResultCard("예상 세후순이익", annualNetIncome, monthlyNetIncome, false, "bg-blue-500", state.iconMap.DollarSign);
-            }
-            
-            const cardsHtml = card1 + card2;
-            
-            const formatRate = (rate) => {
-                const numericRate = parseFloat(rate);
-                return (Number.isFinite(numericRate) ? numericRate : 0).toFixed(1);
-            };
-            
-            const actualRateFormatted = `${formatRate(actualProfitRate)}%`;
-            const targetRateFormatted = `${formatRate(targetProfitRate)}%`;
-
-            const fixedCardsHtml = `
-                ${createFixedResultCard(
-                    "소득률",
-                    null,
-                    actualRateFormatted,
-                    null,
-                    targetRateFormatted,
-                    state.iconMap.PieChart, 
-                    "text-indigo-600"
-                )}
-                ${createFixedResultCard(
-                    "종합소득세", 
-                    "연간",
-                    formatCurrency(annualTax), 
-                    "월간",
-                    formatCurrency(annualTax / 12),
-                    state.iconMap.FileText 
-                )}
-            `;
-
-            const industryAvg = 40;
-            const currentActualRate = actualProfitRate;
-            const diff = industryAvg - currentActualRate;
-            const diffText = diff > 0 ? `낮습니다` : `높습니다`;
-            const insightText = `
-                현재 소득률(<strong>${currentActualRate.toFixed(1)}%</strong>)은 동종 업계 평균(${industryAvg}%) 대비 <strong>${Math.abs(diff).toFixed(1)}%</strong> ${diffText}. 
-                <br/>
-                필요경비를 <strong>₩${formatCompactCurrency(currentResults.monthlyReqExp)}</strong>으로 유지할 경우, 목표 소득률 달성을 위해 연매출 <strong>₩${formatCompactCurrency(currentResults.annualRev)}</strong>이 필요합니다.
-            `;
-
-            state.domRefs.dashboardCards.innerHTML = `
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">${cardsHtml}</div>
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">${fixedCardsHtml}</div>
-            `;
-            
-            state.domRefs.dashboardInsightMode.textContent = getModeLabel(state.calculationMode).split('.')[1].trim();
-            state.domRefs.dashboardInsightText.innerHTML = insightText;
-        };
-        
-        // Table Rendering
-        const renderScenarioTable = () => {
-            const tbody = state.domRefs.scenarioTableBody;
-            let html = '';
-
-            if (state.scenarios.length === 0) {
-                 html = `
-                    <tr>
-                        <td colspan="18" class="px-6 py-12 text-center text-slate-400 bg-slate-50/30">
-                            입력 폼을 통해 시나리오를 추가해주세요.
-                        </td>
-                    </tr>
-                `;
-            } else {
-                state.scenarios.forEach((item, idx) => {
-                    html += `
-                        <tr class="hover:bg-slate-50/80 transition-colors">
-                            <td class="px-3 py-3 text-center font-medium text-slate-400 border-r border-slate-100 sticky sticky-col sticky-col-1 bg-white z-10">${idx + 1}</td>
-                            <td class="px-4 py-3 text-center border-r border-slate-100 sticky sticky-col sticky-col-2 bg-white z-10">
-                                <span class="px-2 py-0.5 rounded-full text-[10px] font-medium bg-slate-100 text-slate-600 truncate block w-24 mx-auto">
-                                    ${item.mode.split('.')[0]} 시나리오
-                                </span>
-                            </td>
-                            
-                            <!-- 소득률 -->
-                            <td class="px-4 py-3 text-center text-blue-700 font-bold bg-blue-50/30 border-r border-slate-100">
-                                ${(item.actualProfitRate).toFixed(1)}%
-                            </td>
-                            <td class="px-4 py-3 text-center text-blue-600 bg-blue-50/30 border-r border-slate-100">
-                                ${(item.targetProfitRate).toFixed(1)}%
-                            </td>
-
-                            <!-- 매출 -->
-                            <td class="px-2 py-3 text-right text-slate-700 font-medium bg-slate-50/30 border-r border-slate-100">${formatCompactCurrency(item.annualRev)}</td>
-                            <td class="px-2 py-3 text-right text-slate-700 bg-slate-50/30 border-r border-slate-100">${formatCompactCurrency(item.monthlyRev)}</td>
-
-                            <!-- 지출 -->
-                            <td class="px-2 py-3 text-right text-slate-700 bg-slate-50/30 border-r border-slate-100">${formatCompactCurrency(item.annualExp)}</td>
-                            <td class="px-2 py-3 text-right text-slate-700 bg-slate-50/30 border-r border-slate-100">${formatCompactCurrency(item.monthlyExp)}</td>
-                            
-                            <!-- 필요경비 -->
-                            <td class="px-2 py-3 text-right text-slate-700 bg-slate-50/30 border-r border-slate-100">${formatCompactCurrency(item.annualReqExp)}</td>
-                            <td class="px-2 py-3 text-right text-slate-700 bg-slate-50/30 border-r border-slate-100">${formatCompactCurrency(item.monthlyReqExp)}</td>
-                            
-                            <!-- 세후순이익 -->
-                            <td class="px-2 py-3 text-right font-bold text-blue-700 bg-blue-50/30 border-r border-slate-100">${formatCompactCurrency(item.annualNetIncome)}</td>
-                            <td class="px-2 py-3 text-right font-bold text-blue-700 bg-blue-50/30 border-r border-slate-100">${formatCompactCurrency(item.monthlyNetIncome)}</td>
-                            
-                            <!-- 세금/연금/보험 -->
-                            <td class="px-2 py-3 text-right text-slate-500 border-r border-slate-100">${formatCompactCurrency(item.annualTax)}</td>
-                            <td class="px-2 py-3 text-right text-slate-500 border-r border-slate-100">${formatCompactCurrency(item.monthlyTax)}</td>
-
-                            <td class="px-2 py-3 text-right text-slate-500 border-r border-slate-100">${formatCompactCurrency(item.annualPension)}</td>
-                            <td class="px-2 py-3 text-right text-slate-500 border-r border-slate-100">${formatCompactCurrency(item.monthlyPension)}</td>
-                            
-                            <td class="px-2 py-3 text-right text-slate-500 border-r border-slate-100">${formatCompactCurrency(item.annualInsurance)}</td>
-                            <td class="px-2 py-3 text-right text-slate-500 border-r border-slate-100">${formatCompactCurrency(item.monthlyInsurance)}</td>
-                            
-                            <td class="px-3 py-3 text-center">
-                                <button onclick="handleRemoveScenario(${item.id})" class="text-slate-400 hover:text-red-500 transition-colors p-1">
-                                    🗑️
-                                </button>
-                            </td>
-                        </tr>
-                    `;
-                });
-            }
-
-            tbody.innerHTML = html;
-        };
-
-        // Input Form Update Logic
-        const updateInputForm = () => {
-            const inputs = state.inputs;
-            const currentResults = state.lastCalculatedResults; 
-            
-            const { 
-                annualRevenueInput, monthlyExpenseInput, monthlyRequiredExpenseInput, 
-                targetProfitRateInput, afterTaxNetIncomeInput 
-            } = state.domRefs;
-
-            [
-                { name: 'annualRevenue', input: annualRevenueInput, isCurrency: true, resultName: 'annualRev' }, 
-                { name: 'monthlyExpense', input: monthlyExpenseInput, isCurrency: true, resultName: 'monthlyExp' },
-                { name: 'monthlyRequiredExpense', input: monthlyRequiredExpenseInput, isCurrency: true, resultName: 'monthlyReqExp' }, 
-                { name: 'targetProfitRate', input: targetProfitRateInput, isCurrency: false, resultName: 'targetProfitRate' }, 
-                { name: 'afterTaxNetIncome', input: afterTaxNetIncomeInput, isCurrency: true, resultName: 'monthlyNetIncome' }
-            ].forEach(({ name, input, isCurrency, resultName }) => {
-                const isDisabled = isInputDisabled(name);
-                const label = input.closest('div.space-y-5 > div').querySelector('label');
-                const statusLabelSpan = label ? label.querySelector('span') : null;
-
-                let valueToDisplay = inputs[name];
-
-                if (isDisabled) {
-                    let resultValue = currentResults[resultName];
-
-                    let formattedValue;
-                    if (isCurrency) {
-                        const value = Math.round(resultValue);
-                        formattedValue = Number.isFinite(value) ? value.toLocaleString() : '0'; 
-                    } else if (name === 'targetProfitRate') {
-                        formattedValue = Number.isFinite(resultValue) ? resultValue.toFixed(2) : '0.00';
-                    }
-                    input.value = formattedValue; 
-                    
-                    const disabledClasses = 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed';
-                    const activeClasses = 'bg-white border-slate-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500';
-                    input.classList.remove(...activeClasses.split(' ')); 
-                    input.classList.add(...disabledClasses.split(' '));
-                    if (statusLabelSpan) statusLabelSpan.style.display = 'inline';
-                    
-                } else {
-                    if (isCurrency) {
-                        input.value = valueToDisplay === 0 ? '' : valueToDisplay.toLocaleString();
-                    } else {
-                        input.value = valueToDisplay === 0 ? '' : valueToDisplay;
-                    }
-                    const baseClasses = 'bg-white border-slate-300 focus:ring-2 focus:ring-blue-500 focus:focus:border-blue-500';
-                    const disabledClasses = 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed';
-                    input.classList.remove(...disabledClasses.split(' '));
-                    input.classList.add(...baseClasses.split(' '));
-                    if (statusLabelSpan) statusLabelSpan.style.display = 'none';
-                }
-                
-                input.placeholder = isDisabled ? "자동 계산" : "0";
-                input.disabled = false;
-            });
-        };
-
-        const renderModeSelectors = () => {
-            const container = state.domRefs.modeSelectors;
-            let html = '';
-
-            state.simulationModes.forEach(mode => {
-                const isActive = state.calculationMode === mode.id;
-                const activeClass = isActive ? 'border-blue-600 bg-blue-50 ring-2 ring-blue-100 ring-offset-2 shadow-md' : 'border-slate-200 bg-white hover:border-blue-300 hover:bg-blue-50/30';
-                const iconClass = isActive ? 'bg-blue-200 text-blue-700' : 'bg-slate-100 text-slate-500 group-hover:bg-blue-100 group-hover:text-blue-600';
-                const labelClass = isActive ? 'text-blue-700' : 'text-slate-700';
-                const indicator = isActive ? '<div class="h-2 w-2 rounded-full bg-blue-600 animate-pulse mt-1"></div>' : '';
-
-                html += `
-                    <button
-                        onclick="setCalculationMode('${mode.id}')"
-                        class="relative p-4 rounded-xl border-2 text-left transition-all group ${activeClass}"
-                    >
-                        <div class="flex justify-between items-start mb-2">
-                            <div class="flex items-center gap-2">
-                                <div class="p-1.5 rounded-lg ${iconClass}">
-                                    ${mode.icon}
-                                </div>
-                                <span class="font-bold text-sm ${labelClass}">
-                                    ${mode.label} <!-- 1. - 5. 포함된 전체 라벨 출력 -->
-                                </span>
-                            </div>
-                            ${indicator}
-                        </div>
-                        <p class="text-xs text-slate-500 pl-9">${mode.desc}</p>
-                    </button>
-                `;
-            });
-            container.innerHTML = html;
-        };
-        
-        const renderApp = () => {
-            renderModeSelectors();
-            updateInputForm();
-            renderDashboard();
-            renderScenarioTable();
-        };
-
-        const setCalculationMode = (modeId) => {
-            state.calculationMode = modeId;
-            renderApp();
-        };
-
-        const handleInput = (e) => {
-            const { name, value, type } = e.target;
-            
-            let rawValue;
-            if (type === 'text' && (name === 'annualRevenue' || name === 'monthlyExpense' || name === 'monthlyRequiredExpense' || name === 'afterTaxNetIncome')) {
-                rawValue = Number(value.replace(/,/g, ''));
-            } else if (type === 'number' && name === 'targetProfitRate') {
-                rawValue = Number(value);
-            } else {
-                return;
-            }
-
-            if (!isNaN(rawValue)) {
-                state.inputs = { ...state.inputs, [name]: rawValue };
-                updateInputForm(); 
-            }
-        };
-
-        const handleAddScenario = () => {
-            const results = calculateResults(state.inputs, state.calculationMode);
-            state.lastCalculatedResults = results;
-
-            const newId = state.scenarios.length > 0 ? Math.max(...state.scenarios.map(s => s.id)) + 1 : 1;
-            const newScenario = { id: newId, mode: getModeLabel(state.calculationMode), ...results };
-            state.scenarios = [...state.scenarios, newScenario];
-            renderApp();
-        };
-
-        const handleRemoveScenario = (id) => {
-            state.scenarios = state.scenarios.filter(s => s.id !== id);
-            renderApp();
-        };
-
-        const handleResetInputs = () => {
-            state.inputs = { ...EMPTY_INPUTS };
-            state.lastCalculatedResults = calculateResults(EMPTY_INPUTS, 'mode1'); 
-            renderApp();
-        };
-
-        const handleClearScenarios = () => {
-            state.scenarios = [];
-            renderApp();
-        };
-
-        window.onload = () => {
-            state.domRefs = {
-                modeSelectors: document.getElementById('mode-selectors'),
-                dashboardCards: document.getElementById('dashboard-cards'),
-                dashboardInsightMode: document.getElementById('dashboard-insight-mode'),
-                dashboardInsightText: document.getElementById('dashboard-insight-text'),
-                scenarioTableBody: document.getElementById('scenario-table-body'),
-                
-                annualRevenueInput: document.querySelector('[name="annualRevenue"]'),
-                monthlyExpenseInput: document.querySelector('[name="monthlyExpense"]'),
-                monthlyRequiredExpenseInput: document.querySelector('[name="monthlyRequiredExpense"]'),
-                targetProfitRateInput: document.querySelector('[name="targetProfitRate"]'),
-                afterTaxNetIncomeInput: document.querySelector('[name="afterTaxNetIncome"]'),
-                
-                addScenarioBtn: document.getElementById('add-scenario-btn'),
-                resetInputsBtn: document.getElementById('reset-inputs-btn'),
-                headerResetBtn: document.getElementById('header-reset-btn'),
-                clearScenariosBtn: document.getElementById('clear-scenarios-btn')
+        case 'mode3': {
+          const tprRatio = targetProfitRate / 100;
+          if (tprRatio > 0) {
+            const funcMode3 = (tni) => {
+              const tax = calculateSimulatedIncomeTax(tni);
+              const ar = tni / tprRatio;
+              const ani = ar - annualExp;
+              return ani - (tax * 1.1);
             };
 
-            state.domRefs.annualRevenueInput.addEventListener('input', handleInput);
-            state.domRefs.monthlyExpenseInput.addEventListener('input', handleInput);
-            state.domRefs.monthlyRequiredExpenseInput.addEventListener('input', handleInput);
-            state.domRefs.targetProfitRateInput.addEventListener('input', handleInput);
-            state.domRefs.afterTaxNetIncomeInput.addEventListener('input', handleInput);
-            
-            state.domRefs.addScenarioBtn.addEventListener('click', handleAddScenario);
-            state.domRefs.resetInputsBtn.addEventListener('click', handleResetInputs);
-            state.domRefs.headerResetBtn.addEventListener('click', handleResetInputs);
-            state.domRefs.clearScenariosBtn.addEventListener('click', handleClearScenarios);
+            taxBaseIncome = solveTNI(funcMode3, annualAfterTaxNetIncome);
 
-            renderApp();
-        };
-    </script>
+            calculatedAnnualRevenue = taxBaseIncome / tprRatio;
+            actualNetIncome = calculatedAnnualRevenue - annualExp;
+
+            const annualReqExp = actualNetIncome - taxBaseIncome;
+            calculatedMonthlyRequiredExpense = annualReqExp / 12;
+          } else {
+            calculatedAnnualRevenue = 0;
+            calculatedMonthlyRequiredExpense = 0;
+            taxBaseIncome = 0;
+            actualNetIncome = 0;
+          }
+          calculatedTargetProfitRate = targetProfitRate;
+          break;
+        }
+
+        case 'mode4': {
+          actualNetIncome = annualRevenue - annualExp;
+          taxBaseIncome = annualRevenue * (targetProfitRate / 100);
+
+          const annualReqExp = actualNetIncome - taxBaseIncome;
+          calculatedMonthlyRequiredExpense = annualReqExp / 12;
+
+          calculatedAnnualRevenue = annualRevenue;
+          calculatedTargetProfitRate = targetProfitRate;
+          break;
+        }
+
+        case 'mode5': {
+          actualNetIncome = annualRevenue - annualExp;
+          const targetTaxBurden = actualNetIncome - annualAfterTaxNetIncome;
+
+          if (targetTaxBurden > 0) {
+            const funcMode5 = (tni) => calculateSimulatedIncomeTax(tni) * 1.1;
+            taxBaseIncome = solveTNI(funcMode5, targetTaxBurden);
+          } else {
+            taxBaseIncome = actualNetIncome;
+          }
+
+          const annualReqExp = actualNetIncome - taxBaseIncome;
+          calculatedMonthlyRequiredExpense = annualReqExp / 12;
+
+          calculatedAnnualRevenue = annualRevenue;
+          calculatedTargetProfitRate = (calculatedAnnualRevenue !== 0)
+            ? (taxBaseIncome / calculatedAnnualRevenue) * 100
+            : 0;
+          break;
+        }
+      }
+
+      const finalAnnualRev = Number.isFinite(calculatedAnnualRevenue) ? calculatedAnnualRevenue : 0;
+      const finalMonthlyRev = finalAnnualRev / 12;
+
+      const finalMonthlyReqExp = Number.isFinite(calculatedMonthlyRequiredExpense) ? calculatedMonthlyRequiredExpense : 0;
+      const finalAnnualReqExp = finalMonthlyReqExp * 12;
+
+      const annualTax = calculateSimulatedIncomeTax(taxBaseIncome);
+      const annualLocalTax = annualTax * 0.1;
+      const totalTaxBurden = annualTax + annualLocalTax;
+
+      const annualPension = taxBaseIncome * 0.045;
+      const annualInsurance = taxBaseIncome * 0.035;
+
+      const actualProfitRate = (finalAnnualRev !== 0) ? (actualNetIncome / finalAnnualRev) * 100 : 0;
+      const targetProfitRateCalculated = (finalAnnualRev !== 0) ? (taxBaseIncome / finalAnnualRev) * 100 : 0;
+
+      const finalAnnualNetIncomePostTax = actualNetIncome - totalTaxBurden;
+      const finalMonthlyNetIncomePostTax = finalAnnualNetIncomePostTax / 12;
+
+      return {
+        annualRev: finalAnnualRev,
+        monthlyRev: finalMonthlyRev,
+        annualExp: annualExp,
+        monthlyExp: monthlyExpense,
+        annualReqExp: finalAnnualReqExp,
+        monthlyReqExp: finalMonthlyReqExp,
+
+        actualProfitRate: actualProfitRate,
+        targetProfitRate: targetProfitRateCalculated,
+
+        annualNetIncome: finalAnnualNetIncomePostTax,
+        monthlyNetIncome: finalMonthlyNetIncomePostTax,
+
+        annualTax: annualTax,
+        monthlyTax: annualTax / 12,
+
+        annualPension: annualPension,
+        monthlyPension: annualPension / 12,
+
+        annualInsurance: annualInsurance,
+        monthlyInsurance: annualInsurance / 12,
+      };
+    };
+
+    /* =========================
+       4) State / UI
+    ========================= */
+    const EMPTY_INPUTS = {
+      annualRevenue: '',
+      monthlyExpense: '',
+      monthlyRequiredExpense: '',
+      targetProfitRate: '',
+      afterTaxNetIncome: '',
+    };
+
+    const state = {
+      calculationMode: 'mode1',
+      inputs: { ...EMPTY_INPUTS },
+      lastCalculatedResults: null, // 계산 전 null
+      scenarios: [],
+      simulationModes: [
+        { id: 'mode1', label: '1. 연매출 & 세후순이익 산출', desc: '월지출, 월필요경비, 목표소득률을 기반으로 연매출/순이익을 역산합니다.', icon: '📈' },
+        { id: 'mode2', label: '2. 연매출 & 목표소득률 산출', desc: '필요경비/지출/세후순이익 기반으로 목표소득률/매출을 역산합니다.', icon: '📊' },
+        { id: 'mode3', label: '3. 연매출 & 필요경비 산출', desc: '지출/목표소득률/세후순이익 기반으로 필요경비/매출을 역산합니다.', icon: '🧮' },
+        { id: 'mode4', label: '4. 필요경비 & 세후순이익 산출', desc: '연매출/지출/목표소득률 기반으로 필요경비/세후순이익을 산출합니다.', icon: '💰' },
+        { id: 'mode5', label: '5. 필요경비 & 목표소득률 산출', desc: '연매출/지출/세후순이익 기반으로 필요경비/목표소득률을 역산합니다.', icon: '🎯' }
+      ],
+      iconMap: {
+        TrendingUp: '📈', PieChart: '📊', Calculator: '🧮',
+        DollarSign: '💰', Target: '🎯', FileText: '📄'
+      },
+      dom: {}
+    };
+
+    const getModeLabel = (mode) => {
+      switch (mode) {
+        case 'mode1': return '1. 연매출 & 세후순이익 산출';
+        case 'mode2': return '2. 연매출 & 목표소득률 산출';
+        case 'mode3': return '3. 연매출 & 필요경비 산출';
+        case 'mode4': return '4. 필요경비 & 세후순이익 산출';
+        case 'mode5': return '5. 필요경비 & 목표소득률 산출';
+        default: return '';
+      }
+    };
+
+    const isInputDisabled = (fieldName) => {
+      const mode = state.calculationMode;
+      switch (mode) {
+        case 'mode1': return fieldName === 'annualRevenue' || fieldName === 'afterTaxNetIncome';
+        case 'mode2': return fieldName === 'annualRevenue' || fieldName === 'targetProfitRate';
+        case 'mode3': return fieldName === 'annualRevenue' || fieldName === 'monthlyRequiredExpense';
+        case 'mode4': return fieldName === 'monthlyRequiredExpense' || fieldName === 'afterTaxNetIncome';
+        case 'mode5': return fieldName === 'monthlyRequiredExpense' || fieldName === 'targetProfitRate';
+        default: return false;
+      }
+    };
+
+    /* =========================
+       5) Render
+    ========================= */
+    const createDynamicResultCard = (title, annual, monthly, isPercentage, colorClass, icon) => {
+      const annualValue = isPercentage
+        ? (Number.isFinite(annual) ? annual.toFixed(1) : '0.0') + '%'
+        : (typeof annual === 'number' ? formatCurrency(annual) : formatCurrency(0));
+
+      const monthlyValue = (typeof monthly === 'number') ? formatCurrency(monthly) : formatCurrency(0);
+
+      return `
+        <div class="bg-white rounded-xl p-5 shadow-sm border border-slate-200 relative overflow-hidden">
+          <div class="absolute top-0 right-0 p-2 rounded-bl-xl opacity-10 ${colorClass}">
+            ${icon}
+          </div>
+          <h4 class="text-sm font-bold text-slate-500 mb-3 flex items-center gap-2">
+            <span class="text-slate-400">${icon}</span> ${title}
+            <span class="text-xs font-normal text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full">산출값</span>
+          </h4>
+          <div class="space-y-3">
+            ${!isPercentage ? `
+              <div class="flex justify-between items-end border-b border-slate-100 pb-2">
+                <span class="text-xs text-slate-400">연간</span>
+                <span class="text-lg font-bold text-slate-800">${annualValue}</span>
+              </div>
+              <div class="flex justify-between items-end">
+                <span class="text-xs text-slate-400">월간</span>
+                <span class="text-lg font-bold text-slate-800">${monthlyValue}</span>
+              </div>
+            ` : `
+              <div class="flex justify-between items-end pt-2">
+                <span class="text-xs text-slate-400">목표 비율</span>
+                <span class="text-2xl font-bold text-slate-800">${annualValue}</span>
+              </div>
+            `}
+          </div>
+        </div>
+      `;
+    };
+
+    const createFixedResultCard = (title, value1Label, value1, value2Label, value2, icon, colorText = "text-slate-800") => {
+      if (title === '소득률') {
+        return `
+          <div class="bg-slate-50 rounded-xl p-5 border border-slate-200">
+            <h4 class="text-sm font-bold text-slate-500 mb-3 flex items-center gap-2">
+              <span class="text-slate-400">${icon}</span> ${title}
+              <span class="text-xs font-normal text-slate-400 bg-slate-200 px-2 py-0.5 rounded-full">고정</span>
+            </h4>
+            <div class="space-y-3">
+              <div class="flex justify-between items-center border-b border-slate-100 pb-2">
+                <span class="text-xs text-slate-400">실제소득률</span>
+                <span class="text-lg font-bold text-slate-800">${value1}</span>
+              </div>
+              <div class="flex justify-between items-center">
+                <span class="text-xs text-slate-400">목표소득률</span>
+                <span class="text-lg font-bold text-slate-800">${value2}</span>
+              </div>
+            </div>
+          </div>
+        `;
+      }
+
+      return `
+        <div class="bg-slate-50 rounded-xl p-5 border border-slate-200">
+          <h4 class="text-sm font-bold text-slate-500 mb-3 flex items-center gap-2">
+            <span class="text-slate-400">${icon}</span> ${title}
+            <span class="text-xs font-normal text-slate-400 bg-slate-200 px-2 py-0.5 rounded-full">고정</span>
+          </h4>
+          <div class="space-y-3">
+            <div class="flex justify-between items-center border-b border-slate-100 pb-2">
+              <span class="text-xs text-slate-400">${value1Label}</span>
+              <span class="text-lg font-bold ${colorText}">${value1}</span>
+            </div>
+            ${value2Label ? `
+              <div class="flex justify-between items-center">
+                <span class="text-xs text-slate-400">${value2Label}</span>
+                <span class="text-lg font-bold ${colorText}">${value2}</span>
+              </div>
+            ` : ''}
+          </div>
+        </div>
+      `;
+    };
+
+    const renderModeSelectors = () => {
+      const container = state.dom.modeSelectors;
+      container.innerHTML = state.simulationModes.map(mode => {
+        const isActive = state.calculationMode === mode.id;
+        const activeClass = isActive
+          ? 'border-blue-600 bg-blue-50 ring-2 ring-blue-100 ring-offset-2 shadow-md'
+          : 'border-slate-200 bg-white hover:border-blue-300 hover:bg-blue-50/30';
+
+        const iconClass = isActive
+          ? 'bg-blue-200 text-blue-700'
+          : 'bg-slate-100 text-slate-500 group-hover:bg-blue-100 group-hover:text-blue-600';
+
+        const labelClass = isActive ? 'text-blue-700' : 'text-slate-700';
+        const indicator = isActive ? '<div class="h-2 w-2 rounded-full bg-blue-600 animate-pulse mt-1"></div>' : '';
+
+        return `
+          <button data-mode="${mode.id}" class="mode-btn relative p-4 rounded-xl border-2 text-left transition-all group ${activeClass}">
+            <div class="flex justify-between items-start mb-2">
+              <div class="flex items-center gap-2">
+                <div class="p-1.5 rounded-lg ${iconClass}">${mode.icon}</div>
+                <span class="font-bold text-sm ${labelClass}">${mode.label}</span>
+              </div>
+              ${indicator}
+            </div>
+            <p class="text-xs text-slate-500 pl-9">${mode.desc}</p>
+          </button>
+        `;
+      }).join('');
+    };
+
+    const updateInputForm = () => {
+      const r = state.lastCalculatedResults;
+      const { annualRevenueInput, monthlyExpenseInput, monthlyRequiredExpenseInput, targetProfitRateInput, afterTaxNetIncomeInput } = state.dom;
+
+      const map = [
+        { name: 'annualRevenue', input: annualRevenueInput, isCurrency: true, resultKey: 'annualRev' },
+        { name: 'monthlyExpense', input: monthlyExpenseInput, isCurrency: true, resultKey: null },
+        { name: 'monthlyRequiredExpense', input: monthlyRequiredExpenseInput, isCurrency: true, resultKey: 'monthlyReqExp' },
+        { name: 'targetProfitRate', input: targetProfitRateInput, isCurrency: false, resultKey: 'targetProfitRate' },
+        { name: 'afterTaxNetIncome', input: afterTaxNetIncomeInput, isCurrency: true, resultKey: 'monthlyNetIncome' },
+      ];
+
+      map.forEach(({ name, input, isCurrency, resultKey }) => {
+        const disabled = isInputDisabled(name);
+        const label = input.closest('div.space-y-5 > div')?.querySelector('label');
+        const statusLabelSpan = label ? label.querySelector('span') : null;
+
+        const disabledClasses = 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed';
+        const activeClasses = 'bg-white border-slate-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500';
+
+        input.classList.remove(...disabledClasses.split(' '), ...activeClasses.split(' '));
+
+        if (disabled) {
+          input.disabled = true;
+          input.classList.add(...disabledClasses.split(' '));
+          if (statusLabelSpan) statusLabelSpan.style.display = 'inline';
+
+          if (!r) {
+            input.value = '';
+            input.placeholder = '계산하기를 누르면 산출';
+          } else {
+            const v = r[resultKey];
+            if (isCurrency) input.value = Math.round(v || 0).toLocaleString('ko-KR');
+            else input.value = Number(v || 0).toFixed(2);
+            input.placeholder = '자동 산출';
+          }
+        } else {
+          input.disabled = false;
+          input.classList.add(...activeClasses.split(' '));
+          if (statusLabelSpan) statusLabelSpan.style.display = 'none';
+
+          // 계산 결과가 있어도 사용자가 입력하는 값은 유지
+          if (document.activeElement !== input) {
+            const raw = state.inputs[name];
+            if (isCurrency) {
+              const n = toNum(raw);
+              input.value = raw === '' ? '' : (n ? n.toLocaleString('ko-KR') : '');
+            } else {
+              input.value = raw === '' ? '' : String(toNum(raw));
+            }
+          }
+          input.placeholder = '0';
+        }
+      });
+    };
+
+    const renderDashboard = () => {
+      const r = state.lastCalculatedResults;
+      const cards = state.dom.dashboardCards;
+
+      if (!r) {
+        cards.innerHTML = `
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            ${createDynamicResultCard("예상 매출", 0, 0, false, "bg-emerald-500", state.iconMap.TrendingUp)}
+            ${createDynamicResultCard("예상 세후순이익", 0, 0, false, "bg-blue-500", state.iconMap.DollarSign)}
+          </div>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            ${createFixedResultCard("소득률", null, "0.0%", null, "0.0%", state.iconMap.PieChart, "text-indigo-600")}
+            ${createFixedResultCard("종합소득세", "연간", formatCurrency(0), "월간", formatCurrency(0), state.iconMap.FileText)}
+          </div>
+        `;
+        state.dom.dashboardInsightMode.textContent = getModeLabel(state.calculationMode).split('.')[1].trim();
+        state.dom.dashboardInsightText.innerHTML = `아직 계산 전입니다. <strong>🧮 계산하기</strong>를 누르면 결과가 표시됩니다.`;
+        return;
+      }
+
+      const { annualRev, monthlyRev, annualReqExp, monthlyReqExp, targetProfitRate, annualNetIncome, monthlyNetIncome, actualProfitRate, annualTax } = r;
+
+      let card1 = '';
+      let card2 = '';
+      switch (state.calculationMode) {
+        case 'mode1':
+          card1 = createDynamicResultCard("예상 매출", annualRev, monthlyRev, false, "bg-emerald-500", state.iconMap.TrendingUp);
+          card2 = createDynamicResultCard("예상 세후순이익", annualNetIncome, monthlyNetIncome, false, "bg-blue-500", state.iconMap.DollarSign);
+          break;
+        case 'mode2':
+          card1 = createDynamicResultCard("예상 매출", annualRev, monthlyRev, false, "bg-emerald-500", state.iconMap.TrendingUp);
+          card2 = createDynamicResultCard("목표소득률", targetProfitRate, 0, true, "bg-purple-500", state.iconMap.Target);
+          break;
+        case 'mode3':
+          card1 = createDynamicResultCard("예상 매출", annualRev, monthlyRev, false, "bg-emerald-500", state.iconMap.TrendingUp);
+          card2 = createDynamicResultCard("필요경비", annualReqExp, monthlyReqExp, false, "bg-orange-500", state.iconMap.Calculator);
+          break;
+        case 'mode4':
+          card1 = createDynamicResultCard("필요경비", annualReqExp, monthlyReqExp, false, "bg-orange-500", state.iconMap.Calculator);
+          card2 = createDynamicResultCard("예상 세후순이익", annualNetIncome, monthlyNetIncome, false, "bg-blue-500", state.iconMap.DollarSign);
+          break;
+        case 'mode5':
+          card1 = createDynamicResultCard("필요경비", annualReqExp, monthlyReqExp, false, "bg-orange-500", state.iconMap.Calculator);
+          card2 = createDynamicResultCard("목표소득률", targetProfitRate, 0, true, "bg-purple-500", state.iconMap.Target);
+          break;
+      }
+
+      const fixedCardsHtml = `
+        ${createFixedResultCard("소득률", null, `${formatRate1(actualProfitRate)}%`, null, `${formatRate1(targetProfitRate)}%`, state.iconMap.PieChart, "text-indigo-600")}
+        ${createFixedResultCard("종합소득세", "연간", formatCurrency(annualTax), "월간", formatCurrency(annualTax / 12), state.iconMap.FileText)}
+      `;
+
+      cards.innerHTML = `
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">${card1 + card2}</div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">${fixedCardsHtml}</div>
+      `;
+
+      const industryAvg = 40;
+      const diff = industryAvg - actualProfitRate;
+      const diffText = diff > 0 ? '낮습니다' : '높습니다';
+
+      state.dom.dashboardInsightMode.textContent = getModeLabel(state.calculationMode).split('.')[1].trim();
+      state.dom.dashboardInsightText.innerHTML = `
+        현재 소득률(<strong>${formatRate1(actualProfitRate)}%</strong>)은 동종 업계 평균(${industryAvg}%) 대비
+        <strong>${Math.abs(diff).toFixed(1)}%</strong> ${diffText}.<br/>
+        필요경비를 <strong>₩${formatCompactCurrency(monthlyReqExp)}</strong>으로 유지할 경우,
+        목표 소득률 달성을 위해 연매출 <strong>₩${formatCompactCurrency(annualRev)}</strong>이 필요합니다.
+      `;
+    };
+
+    const renderScenarioTable = () => {
+      const tbody = state.dom.scenarioTableBody;
+
+      if (state.scenarios.length === 0) {
+        tbody.innerHTML = `
+          <tr>
+            <td colspan="18" class="px-6 py-12 text-center text-slate-400 bg-slate-50/30">
+              입력 후 <strong>🧮 계산하기</strong>를 눌러 시나리오를 추가해주세요.
+            </td>
+          </tr>
+        `;
+        return;
+      }
+
+      tbody.innerHTML = state.scenarios.map((item, idx) => `
+        <tr class="hover:bg-slate-50/80 transition-colors">
+          <td class="px-3 py-3 text-center font-medium text-slate-400 border-r border-slate-100 sticky sticky-col sticky-col-1 bg-white z-10">${idx + 1}</td>
+
+          <td class="px-4 py-3 text-center border-r border-slate-100 sticky sticky-col sticky-col-2 bg-white z-10">
+            <span class="px-2 py-0.5 rounded-full text-[10px] font-medium bg-slate-100 text-slate-600 truncate block w-24 mx-auto">
+              ${item.mode.split('.')[0]} 시나리오
+            </span>
+          </td>
+
+          <td class="px-4 py-3 text-center text-blue-700 font-bold bg-blue-50/30 border-r border-slate-100">${formatRate1(item.actualProfitRate)}%</td>
+          <td class="px-4 py-3 text-center text-blue-600 bg-blue-50/30 border-r border-slate-100">${formatRate1(item.targetProfitRate)}%</td>
+
+          <td class="px-2 py-3 text-right text-slate-700 font-medium bg-slate-50/30 border-r border-slate-100">${formatCompactCurrency(item.annualRev)}</td>
+          <td class="px-2 py-3 text-right text-slate-700 bg-slate-50/30 border-r border-slate-100">${formatCompactCurrency(item.monthlyRev)}</td>
+
+          <td class="px-2 py-3 text-right text-slate-700 bg-slate-50/30 border-r border-slate-100">${formatCompactCurrency(item.annualExp)}</td>
+          <td class="px-2 py-3 text-right text-slate-700 bg-slate-50/30 border-r border-slate-100">${formatCompactCurrency(item.monthlyExp)}</td>
+
+          <td class="px-2 py-3 text-right text-slate-700 bg-slate-50/30 border-r border-slate-100">${formatCompactCurrency(item.annualReqExp)}</td>
+          <td class="px-2 py-3 text-right text-slate-700 bg-slate-50/30 border-r border-slate-100">${formatCompactCurrency(item.monthlyReqExp)}</td>
+
+          <td class="px-2 py-3 text-right font-bold text-blue-700 bg-blue-50/30 border-r border-slate-100">${formatCompactCurrency(item.annualNetIncome)}</td>
+          <td class="px-2 py-3 text-right font-bold text-blue-700 bg-blue-50/30 border-r border-slate-100">${formatCompactCurrency(item.monthlyNetIncome)}</td>
+
+          <td class="px-2 py-3 text-right text-slate-500 border-r border-slate-100">${formatCompactCurrency(item.annualTax)}</td>
+          <td class="px-2 py-3 text-right text-slate-500 border-r border-slate-100">${formatCompactCurrency(item.monthlyTax)}</td>
+
+          <td class="px-2 py-3 text-right text-slate-500 border-r border-slate-100">${formatCompactCurrency(item.annualPension)}</td>
+          <td class="px-2 py-3 text-right text-slate-500 border-r border-slate-100">${formatCompactCurrency(item.monthlyPension)}</td>
+
+          <td class="px-2 py-3 text-right text-slate-500 border-r border-slate-100">${formatCompactCurrency(item.annualInsurance)}</td>
+          <td class="px-2 py-3 text-right text-slate-500 border-r border-slate-100">${formatCompactCurrency(item.monthlyInsurance)}</td>
+
+          <td class="px-3 py-3 text-center">
+            <button class="remove-btn text-slate-400 hover:text-red-500 transition-colors p-1" data-id="${item.id}">🗑️</button>
+          </td>
+        </tr>
+      `).join('');
+    };
+
+    const renderApp = () => {
+      renderModeSelectors();
+      updateInputForm();
+      renderDashboard();
+      renderScenarioTable();
+    };
+
+    /* =========================
+       6) Actions
+    ========================= */
+    const setCalculationMode = (modeId) => {
+      state.calculationMode = modeId;
+      updateInputForm();
+      renderModeSelectors();
+      renderDashboard();
+    };
+
+    const handleAddScenario = () => {
+      const results = calculateResults(state.inputs, state.calculationMode);
+      state.lastCalculatedResults = results;
+
+      const newId = state.scenarios.length > 0 ? Math.max(...state.scenarios.map(s => s.id)) + 1 : 1;
+      state.scenarios.push({ id: newId, mode: getModeLabel(state.calculationMode), ...results });
+
+      renderApp();
+    };
+
+    const handleRemoveScenario = (id) => {
+      state.scenarios = state.scenarios.filter(s => s.id !== id);
+      renderScenarioTable();
+    };
+
+    const handleResetInputs = () => {
+      state.inputs = { ...EMPTY_INPUTS };
+      state.lastCalculatedResults = null;
+      renderApp();
+    };
+
+    const handleClearScenarios = () => {
+      state.scenarios = [];
+      renderScenarioTable();
+    };
+
+    /* =========================
+       7) ✅ Excel Export
+    ========================= */
+    const exportScenariosToExcel = () => {
+      if (!window.XLSX) {
+        alert('엑셀 모듈(SheetJS)이 로드되지 않았습니다.');
+        return;
+      }
+      if (!state.scenarios.length) {
+        alert('다운로드할 시나리오가 없습니다. 먼저 시나리오를 추가하세요.');
+        return;
+      }
+
+      const header = [
+        'No', '구분(모드)',
+        '실제소득률(%)', '목표소득률(%)',
+        '연매출', '월매출',
+        '연지출', '월지출',
+        '연필요경비', '월필요경비',
+        '연세후순이익', '월세후순이익',
+        '연종합소득세', '월종합소득세',
+        '연국민연금', '월국민연금',
+        '연건강보험료', '월건강보험료'
+      ];
+
+      const rows = state.scenarios.map((s, i) => ([
+        i + 1,
+        s.mode,
+        Number(formatRate1(s.actualProfitRate)),
+        Number(formatRate1(s.targetProfitRate)),
+        Math.round(s.annualRev),
+        Math.round(s.monthlyRev),
+        Math.round(s.annualExp),
+        Math.round(s.monthlyExp),
+        Math.round(s.annualReqExp),
+        Math.round(s.monthlyReqExp),
+        Math.round(s.annualNetIncome),
+        Math.round(s.monthlyNetIncome),
+        Math.round(s.annualTax),
+        Math.round(s.monthlyTax),
+        Math.round(s.annualPension),
+        Math.round(s.monthlyPension),
+        Math.round(s.annualInsurance),
+        Math.round(s.monthlyInsurance),
+      ]));
+
+      const aoa = [header, ...rows];
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+
+      // 보기 좋게 열 너비
+      ws['!cols'] = [
+        { wch: 5 }, { wch: 24 },
+        { wch: 14 }, { wch: 14 },
+        { wch: 14 }, { wch: 14 },
+        { wch: 14 }, { wch: 14 },
+        { wch: 14 }, { wch: 14 },
+        { wch: 16 }, { wch: 16 },
+        { wch: 14 }, { wch: 14 },
+        { wch: 14 }, { wch: 14 },
+        { wch: 14 }, { wch: 14 },
+      ];
+
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Scenarios');
+
+      const now = new Date();
+      const y = now.getFullYear();
+      const m = String(now.getMonth() + 1).padStart(2, '0');
+      const d = String(now.getDate()).padStart(2, '0');
+      const filename = `Pro-Consulting-Scenarios_${y}${m}${d}.xlsx`;
+
+      XLSX.writeFile(wb, filename);
+    };
+
+    /* =========================
+       8) Boot
+    ========================= */
+    window.addEventListener('load', () => {
+      state.dom = {
+        modeSelectors: document.getElementById('mode-selectors'),
+        dashboardCards: document.getElementById('dashboard-cards'),
+        dashboardInsightMode: document.getElementById('dashboard-insight-mode'),
+        dashboardInsightText: document.getElementById('dashboard-insight-text'),
+        scenarioTableBody: document.getElementById('scenario-table-body'),
+
+        annualRevenueInput: document.querySelector('[name="annualRevenue"]'),
+        monthlyExpenseInput: document.querySelector('[name="monthlyExpense"]'),
+        monthlyRequiredExpenseInput: document.querySelector('[name="monthlyRequiredExpense"]'),
+        targetProfitRateInput: document.querySelector('[name="targetProfitRate"]'),
+        afterTaxNetIncomeInput: document.querySelector('[name="afterTaxNetIncome"]'),
+
+        addScenarioBtn: document.getElementById('add-scenario-btn'),
+        resetInputsBtn: document.getElementById('reset-inputs-btn'),
+        headerResetBtn: document.getElementById('header-reset-btn'),
+        clearScenariosBtn: document.getElementById('clear-scenarios-btn'),
+        excelBtn: document.getElementById('excel-download-btn'),
+      };
+
+      // ✅ 통화 입력: 입력 중 자동 콤마 + state.inputs 업데이트
+      const bindCurrencyLiveComma = (inputEl, key) => {
+        inputEl.addEventListener('input', (e) => {
+          if (inputEl.disabled) return;
+          formatNumberInputWithComma(inputEl);
+          state.inputs[key] = inputEl.value; // 콤마 포함 문자열 저장
+        });
+        inputEl.addEventListener('blur', () => {
+          if (inputEl.disabled) return;
+          const n = toNum(inputEl.value);
+          inputEl.value = n ? n.toLocaleString('ko-KR') : '';
+          state.inputs[key] = inputEl.value;
+        });
+      };
+
+      bindCurrencyLiveComma(state.dom.annualRevenueInput, 'annualRevenue');
+      bindCurrencyLiveComma(state.dom.monthlyExpenseInput, 'monthlyExpense');
+      bindCurrencyLiveComma(state.dom.monthlyRequiredExpenseInput, 'monthlyRequiredExpense');
+      bindCurrencyLiveComma(state.dom.afterTaxNetIncomeInput, 'afterTaxNetIncome');
+
+      state.dom.targetProfitRateInput.addEventListener('input', (e) => {
+        if (state.dom.targetProfitRateInput.disabled) return;
+        state.inputs.targetProfitRate = e.target.value;
+      });
+
+      state.dom.addScenarioBtn.addEventListener('click', handleAddScenario);
+      state.dom.resetInputsBtn.addEventListener('click', handleResetInputs);
+      state.dom.headerResetBtn.addEventListener('click', handleResetInputs);
+      state.dom.clearScenariosBtn.addEventListener('click', handleClearScenarios);
+      state.dom.excelBtn.addEventListener('click', exportScenariosToExcel);
+
+      document.addEventListener('click', (e) => {
+        const modeBtn = e.target.closest('.mode-btn');
+        if (modeBtn) {
+          setCalculationMode(modeBtn.getAttribute('data-mode'));
+          return;
+        }
+        const removeBtn = e.target.closest('.remove-btn');
+        if (removeBtn) {
+          const id = toNum(removeBtn.getAttribute('data-id'));
+          handleRemoveScenario(id);
+          return;
+        }
+      });
+
+      renderApp();
+    });
+  </script>
 </head>
+
 <body class="min-h-screen bg-slate-50 font-sans text-slate-900">
-    <div id="app-root">
-        <!-- Header -->
-        <header class="bg-white border-b border-slate-200 sticky top-0 z-30">
-            <!-- Header content unchanged -->
-            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
-                <div class="flex items-center gap-2">
-                    <div class="bg-blue-600 p-2 rounded-lg">
-                        🧮
-                    </div>
-                    <h1 class="text-xl font-bold text-slate-800 tracking-tight">Pro-Consulting Lab</h1>
-                </div>
-                <div class="flex items-center gap-3">
-                    <button id="header-reset-btn" class="text-sm text-slate-500 hover:text-slate-800 px-3 py-2 flex items-center gap-1 transition-colors rounded-lg">
-                        🔄 초기화
-                    </button>
-                    <button class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 shadow-sm transition-colors">
-                        💾 데이터 저장
-                    </button>
-                </div>
-            </div>
-        </header>
+  <div id="app-root">
 
-        <main class="max-w-[1800px] mx-auto px-4 sm:px-6 lg:px-8 py-8">
-            <!-- Main content unchanged, structure preserved -->
-            
-            <!-- 1. Calculation Mode Selector -->
-            <section class="mb-8">
-                <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
-                    💡 시뮬레이션 기준 설정
-                </h2>
-                <div id="mode-selectors" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
-                    <!-- Mode buttons rendered by JavaScript -->
-                </div>
-            </section>
+    <header class="bg-white border-b border-slate-200 sticky top-0 z-30">
+      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <div class="bg-blue-600 p-2 rounded-lg">🧮</div>
+          <h1 class="text-xl font-bold text-slate-800 tracking-tight">Pro-Consulting Lab</h1>
+        </div>
+        <div class="flex items-center gap-3">
+          <button id="header-reset-btn" class="text-sm text-slate-500 hover:text-slate-800 px-3 py-2 flex items-center gap-1 transition-colors rounded-lg">
+            🔄 초기화
+          </button>
+          <button class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 shadow-sm transition-colors">
+            💾 데이터 저장
+          </button>
+        </div>
+      </div>
+    </header>
 
-            <!-- 2. Input & Immediate Result Area -->
-            <div class="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-10">
-                <!-- Left: Input Form -->
-                <div class="lg:col-span-1 bg-white rounded-2xl shadow-xl border border-slate-200 p-6">
-                    <div class="flex justify-between items-center mb-6">
-                        <h3 class="font-bold text-lg text-slate-800">기초 데이터 입력</h3>
-                        <span class="text-xs font-medium px-2 py-1 bg-slate-100 rounded text-slate-500">단위: 원</span>
-                    </div>
-                    
-                    <div class="space-y-5" id="input-form">
-                        <!-- 연매출 -->
-                        <div>
-                            <label class="block text-sm font-medium text-slate-700 mb-1.5 flex justify-between">
-                                연매출
-                                <span style="display: none;" class="text-xs text-blue-500 font-normal self-center">자동 산출됨</span>
-                            </label>
-                            <input type="text" name="annualRevenue" placeholder="0" class="w-full px-4 py-2.5 rounded-lg border transition-colors" />
-                        </div>
+    <main class="max-w-[1800px] mx-auto px-4 sm:px-6 lg:px-8 py-8">
 
-                        <!-- 월지출 -->
-                        <div>
-                            <label class="block text-sm font-medium text-slate-700 mb-1.5">월지출</label>
-                            <input type="text" name="monthlyExpense" placeholder="0" class="w-full px-4 py-2.5 rounded-lg border transition-colors" />
-                        </div>
+      <section class="mb-8">
+        <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">💡 시뮬레이션 기준 설정</h2>
+        <div id="mode-selectors" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4"></div>
+      </section>
 
-                        <!-- 월필요경비 -->
-                        <div>
-                            <label class="block text-sm font-medium text-slate-700 mb-1.5 flex justify-between">
-                                월필요경비
-                                <span style="display: none;" class="text-xs text-blue-500 font-normal self-center">자동 산출됨</span>
-                            </label>
-                            <input type="text" name="monthlyRequiredExpense" placeholder="0" class="w-full px-4 py-2.5 rounded-lg border transition-colors" />
-                        </div>
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-10">
+        <div class="lg:col-span-1 bg-white rounded-2xl shadow-xl border border-slate-200 p-6">
+          <div class="flex justify-between items-center mb-6">
+            <h3 class="font-bold text-lg text-slate-800">기초 데이터 입력</h3>
+            <span class="text-xs font-medium px-2 py-1 bg-slate-100 rounded text-slate-500">단위: 원</span>
+          </div>
 
-                        <!-- 목표소득률 -->
-                        <div>
-                            <label class="block text-sm font-medium text-slate-700 mb-1.5 flex justify-between">
-                                목표소득률 (%)
-                                <span style="display: none;" class="text-xs text-blue-500 font-normal self-center">자동 산출됨</span> 
-                            </label>
-                            <div class="relative">
-                                <input type="number" name="targetProfitRate" placeholder="0" class="w-full px-4 py-2.5 rounded-lg border transition-colors pr-8" />
-                                <span class="absolute right-3 top-2.5 text-slate-400">%</span>
-                            </div>
-                        </div>
-
-                        <!-- 세후월순이익 -->
-                        <div>
-                            <label class="block text-sm font-medium text-slate-700 mb-1.5 flex justify-between">
-                                세후월순이익
-                                <span style="display: none;" class="text-xs text-blue-500 font-normal self-center">자동 산출됨</span>
-                            </label>
-                            <input type="text" name="afterTaxNetIncome" placeholder="0" class="w-full px-4 py-2.5 rounded-lg border transition-colors" />
-                        </div>
-
-                        <!-- Buttons Section -->
-                        <div class="grid grid-cols-2 gap-3 mt-8 pt-4 border-t border-slate-100">
-                            <button id="add-scenario-btn" class="bg-blue-600 hover:bg-blue-700 text-white py-3 rounded-xl font-semibold shadow-lg shadow-blue-200 transition-all flex items-center justify-center gap-2 transform hover:scale-[1.02] active:scale-100">
-                                🧮 계산하기
-                            </button>
-                            <button id="reset-inputs-btn" class="bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 py-3 rounded-xl font-semibold transition-all flex items-center justify-center gap-2">
-                                🔄 입력 초기화
-                            </button>
-                        </div>
-
-                    </div>
-                </div>
-
-                <!-- Right: Preview / Quick Dashboard -->
-                <div class="lg:col-span-2 space-y-6">
-                    
-                    <h3 class="font-bold text-lg text-slate-800 mb-4 flex items-center gap-2">
-                        ➡️ 실시간 분석 대시보드
-                    </h3>
-
-                    <div id="dashboard-cards" class="space-y-4">
-                        <!-- Dashboard cards rendered by JavaScript -->
-                    </div>
-
-                    <!-- Alert / Notifications Area -->
-                    <div class="bg-amber-50 border border-amber-200 rounded-xl p-4 flex items-start gap-3">
-                        <div class="p-1 bg-amber-100 rounded text-amber-600 mt-1">
-                            📈
-                        </div>
-                        <div>
-                            <h4 class="text-sm font-bold text-amber-800">컨설팅 인사이트 (<span id="dashboard-insight-mode"></span>)</h4>
-                            <p class="text-sm text-amber-700 mt-1 leading-relaxed" id="dashboard-insight-text">
-                                <!-- Insight text rendered by JavaScript -->
-                            </p>
-                        </div>
-                    </div>
-                </div>
+          <div class="space-y-5" id="input-form">
+            <div>
+              <label class="block text-sm font-medium text-slate-700 mb-1.5 flex justify-between">
+                연매출
+                <span style="display: none;" class="text-xs text-blue-500 font-normal self-center">자동 산출됨</span>
+              </label>
+              <input type="text" name="annualRevenue" placeholder="0" class="w-full px-4 py-2.5 rounded-lg border transition-colors" />
             </div>
 
-            <!-- 3. Comprehensive Data Table -->
-            <div class="bg-white rounded-2xl shadow-xl border border-slate-200 overflow-hidden">
-                <div class="p-5 border-b border-slate-200 flex justify-between items-center bg-slate-50/50">
-                    <h3 class="font-bold text-lg text-slate-800 flex items-center gap-2">
-                        📄 시나리오 비교 분석
-                    </h3>
-                    <div class="flex gap-2">
-                        <button class="text-xs font-medium bg-white border border-slate-300 px-3 py-1.5 rounded-lg hover:bg-slate-50 transition-colors">Excel 다운로드</button>
-                        <button id="clear-scenarios-btn" class="text-xs font-medium bg-white border border-slate-300 px-3 py-1.5 rounded-lg hover:bg-red-50 transition-colors text-red-500 border-red-200">
-                            🗑️ 전체 삭제
-                        </button>
-                    </div>
-                </div>
-                
-                <div class="table-container">
-                    <table class="w-full text-xs text-left border-collapse">
-                        <thead class="bg-slate-50 text-slate-600 font-semibold border-b border-slate-200 sticky top-0 z-20">
-                            <tr>
-                                <th rowspan="2" class="px-3 py-4 whitespace-nowrap text-center border-r border-slate-200 sticky sticky-col sticky-col-1 bg-slate-50 z-20">No</th>
-                                <th rowspan="2" class="px-4 py-4 whitespace-nowrap text-center border-r border-slate-200 sticky sticky-col sticky-col-2 bg-slate-50 z-20">구분</th>
-                                
-                                <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200 bg-blue-50 text-blue-800">소득률</th>
-                                
-                                <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200 bg-slate-100 text-slate-800">매출</th>
-
-                                <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200 bg-slate-100 text-slate-800">지출</th>
-
-                                <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200 bg-slate-100 text-slate-800">필요 경비</th>
-
-                                <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200 bg-blue-50 text-blue-800">세후순이익</th>
-                                
-                                <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200">종합소득세</th>
-                                <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200">국민연금</th>
-                                <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200">건강보험료</th>
-                                <th rowspan="2" class="px-3 py-4 text-center">관리</th>
-                            </tr>
-                            <tr class="bg-slate-50/50 text-[11px] text-slate-500">
-                                <th class="px-4 py-2 text-center border-r border-slate-200 bg-blue-50/50 text-blue-800">실제</th>
-                                <th class="px-4 py-2 text-center border-r border-slate-200 bg-blue-50/50 text-blue-800">목표</th>
-                                
-                                <th class="px-2 py-2 text-center border-r border-slate-200 bg-slate-100/50 text-slate-800">연간</th>
-                                <th class="px-2 py-2 text-center border-r border-slate-200 bg-slate-100/50 text-slate-800">월간</th>
-
-                                <th class="px-2 py-2 text-center border-r border-slate-200 bg-slate-100/50 text-slate-800">연간</th>
-                                <th class="px-2 py-2 text-center border-r border-slate-200 bg-slate-100/50 text-slate-800">월간</th>
-
-                                <th class="px-2 py-2 text-center border-r border-slate-200 bg-slate-100/50 text-slate-800">연간</th>
-                                <th class="px-2 py-2 text-center border-r border-slate-200 bg-slate-100/50 text-slate-800">월간</th>
-
-                                <th class="px-2 py-2 text-center border-r border-slate-200 bg-blue-50/50 text-blue-800">연간</th>
-                                <th class="px-2 py-2 text-center border-r border-slate-200 bg-blue-50/50 text-blue-800">월간</th>
-                                
-                                <th class="px-2 py-2 text-center border-r border-slate-200">연간</th>
-                                <th class="px-2 py-2 text-center border-r border-slate-200">월간</th>
-                                <th class="px-2 py-2 text-center border-r border-slate-200">연간</th>
-                                <th class="px-2 py-2 text-center border-r border-slate-200">월간</th>
-                                <th class="px-2 py-2 text-center border-r border-slate-200">연간</th>
-                                <th class="px-2 py-2 text-center border-r border-slate-200">월간</th>
-                            </tr>
-                        </thead>
-                        <tbody id="scenario-table-body" class="divide-y divide-slate-100">
-                            <!-- Table rows rendered by JavaScript -->
-                        </tbody>
-                    </table>
-                </div>
+            <div>
+              <label class="block text-sm font-medium text-slate-700 mb-1.5">월지출</label>
+              <input type="text" name="monthlyExpense" placeholder="0" class="w-full px-4 py-2.5 rounded-lg border transition-colors" />
             </div>
-        </main>
-    </div>
+
+            <div>
+              <label class="block text-sm font-medium text-slate-700 mb-1.5 flex justify-between">
+                월필요경비
+                <span style="display: none;" class="text-xs text-blue-500 font-normal self-center">자동 산출됨</span>
+              </label>
+              <input type="text" name="monthlyRequiredExpense" placeholder="0" class="w-full px-4 py-2.5 rounded-lg border transition-colors" />
+            </div>
+
+            <div>
+              <label class="block text-sm font-medium text-slate-700 mb-1.5 flex justify-between">
+                목표소득률 (%)
+                <span style="display: none;" class="text-xs text-blue-500 font-normal self-center">자동 산출됨</span>
+              </label>
+              <div class="relative">
+                <input type="number" name="targetProfitRate" step="0.1" placeholder="0" class="w-full px-4 py-2.5 rounded-lg border transition-colors pr-8" />
+                <span class="absolute right-3 top-2.5 text-slate-400">%</span>
+              </div>
+            </div>
+
+            <div>
+              <label class="block text-sm font-medium text-slate-700 mb-1.5 flex justify-between">
+                세후월순이익
+                <span style="display: none;" class="text-xs text-blue-500 font-normal self-center">자동 산출됨</span>
+              </label>
+              <input type="text" name="afterTaxNetIncome" placeholder="0" class="w-full px-4 py-2.5 rounded-lg border transition-colors" />
+            </div>
+
+            <div class="grid grid-cols-2 gap-3 mt-8 pt-4 border-t border-slate-100">
+              <button id="add-scenario-btn" class="bg-blue-600 hover:bg-blue-700 text-white py-3 rounded-xl font-semibold shadow-lg shadow-blue-200 transition-all flex items-center justify-center gap-2 transform hover:scale-[1.02] active:scale-100">
+                🧮 계산하기
+              </button>
+              <button id="reset-inputs-btn" class="bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 py-3 rounded-xl font-semibold transition-all flex items-center justify-center gap-2">
+                🔄 입력 초기화
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="lg:col-span-2 space-y-6">
+          <h3 class="font-bold text-lg text-slate-800 mb-4 flex items-center gap-2">➡️ 실시간 분석 대시보드</h3>
+          <div id="dashboard-cards" class="space-y-4"></div>
+
+          <div class="bg-amber-50 border border-amber-200 rounded-xl p-4 flex items-start gap-3">
+            <div class="p-1 bg-amber-100 rounded text-amber-600 mt-1">📈</div>
+            <div>
+              <h4 class="text-sm font-bold text-amber-800">컨설팅 인사이트 (<span id="dashboard-insight-mode"></span>)</h4>
+              <p class="text-sm text-amber-700 mt-1 leading-relaxed" id="dashboard-insight-text"></p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="bg-white rounded-2xl shadow-xl border border-slate-200 overflow-hidden">
+        <div class="p-5 border-b border-slate-200 flex justify-between items-center bg-slate-50/50">
+          <h3 class="font-bold text-lg text-slate-800 flex items-center gap-2">📄 시나리오 비교 분석</h3>
+          <div class="flex gap-2">
+            <!-- ✅ id 추가 -->
+            <button id="excel-download-btn" class="text-xs font-medium bg-white border border-slate-300 px-3 py-1.5 rounded-lg hover:bg-slate-50 transition-colors">
+              Excel 다운로드
+            </button>
+            <button id="clear-scenarios-btn" class="text-xs font-medium bg-white border border-slate-300 px-3 py-1.5 rounded-lg hover:bg-red-50 transition-colors text-red-500 border-red-200">
+              🗑️ 전체 삭제
+            </button>
+          </div>
+        </div>
+
+        <div class="table-container">
+          <table class="w-full text-xs text-left border-collapse">
+            <thead class="bg-slate-50 text-slate-600 font-semibold border-b border-slate-200 sticky top-0 z-20">
+              <tr>
+                <th rowspan="2" class="px-3 py-4 whitespace-nowrap text-center border-r border-slate-200 sticky sticky-col sticky-col-1 bg-slate-50 z-20">No</th>
+                <th rowspan="2" class="px-4 py-4 whitespace-nowrap text-center border-r border-slate-200 sticky sticky-col sticky-col-2 bg-slate-50 z-20">구분</th>
+
+                <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200 bg-blue-50 text-blue-800">소득률</th>
+
+                <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200 bg-slate-100 text-slate-800">매출</th>
+                <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200 bg-slate-100 text-slate-800">지출</th>
+                <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200 bg-slate-100 text-slate-800">필요 경비</th>
+
+                <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200 bg-blue-50 text-blue-800">세후순이익</th>
+
+                <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200">종합소득세</th>
+                <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200">국민연금</th>
+                <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200">건강보험료</th>
+                <th rowspan="2" class="px-3 py-4 text-center">관리</th>
+              </tr>
+              <tr class="bg-slate-50/50 text-[11px] text-slate-500">
+                <th class="px-4 py-2 text-center border-r border-slate-200 bg-blue-50/50 text-blue-800">실제</th>
+                <th class="px-4 py-2 text-center border-r border-slate-200 bg-blue-50/50 text-blue-800">목표</th>
+
+                <th class="px-2 py-2 text-center border-r border-slate-200 bg-slate-100/50 text-slate-800">연간</th>
+                <th class="px-2 py-2 text-center border-r border-slate-200 bg-slate-100/50 text-slate-800">월간</th>
+
+                <th class="px-2 py-2 text-center border-r border-slate-200 bg-slate-100/50 text-slate-800">연간</th>
+                <th class="px-2 py-2 text-center border-r border-slate-200 bg-slate-100/50 text-slate-800">월간</th>
+
+                <th class="px-2 py-2 text-center border-r border-slate-200 bg-slate-100/50 text-slate-800">연간</th>
+                <th class="px-2 py-2 text-center border-r border-slate-200 bg-slate-100/50 text-slate-800">월간</th>
+
+                <th class="px-2 py-2 text-center border-r border-slate-200 bg-blue-50/50 text-blue-800">연간</th>
+                <th class="px-2 py-2 text-center border-r border-slate-200 bg-blue-50/50 text-blue-800">월간</th>
+
+                <th class="px-2 py-2 text-center border-r border-slate-200">연간</th>
+                <th class="px-2 py-2 text-center border-r border-slate-200">월간</th>
+
+                <th class="px-2 py-2 text-center border-r border-slate-200">연간</th>
+                <th class="px-2 py-2 text-center border-r border-slate-200">월간</th>
+
+                <th class="px-2 py-2 text-center border-r border-slate-200">연간</th>
+                <th class="px-2 py-2 text-center border-r border-slate-200">월간</th>
+              </tr>
+            </thead>
+            <tbody id="scenario-table-body" class="divide-y divide-slate-100"></tbody>
+          </table>
+        </div>
+      </div>
+    </main>
+  </div>
 </body>
 </html>
