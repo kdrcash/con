@@ -151,6 +151,13 @@
       return Number.isFinite(n) ? n : fallback;
     }
 
+    // ✅ null/undefined/""는 숫자로 보지 않도록(상하한 파싱 안정화)
+    function parseBound(v) {
+      if (v === null || v === undefined || v === '') return null;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    }
+
     // =========================================================
     // 3) (Lambda 기준) 종합소득세 누진세율 계산 (Quick Deduction)
     // =========================================================
@@ -193,14 +200,14 @@
     //   - 사업주: 근로자 부담률의 2배(= employeeRate*2)
     // =========================================================
     function getInsuranceMetaFromLambda() {
-      // 람다 /meta가 보통 { year, ranges: { np:{min,max}, hi:{min,max} }, ... } 형태라고 가정
       const meta = API_STATUS.meta || {};
       const ranges = meta.ranges || {};
 
-      const npMin = numOr(ranges?.np?.min, null);
-      const npMax = numOr(ranges?.np?.max, null);
-      const hiMin = numOr(ranges?.hi?.min, null);
-      const hiMax = numOr(ranges?.hi?.max, null);
+      // ✅ 상/하한 파싱(없으면 null)
+      const npMin = parseBound(ranges?.np?.min);
+      const npMax = parseBound(ranges?.np?.max);
+      const hiMin = parseBound(ranges?.hi?.min);
+      const hiMax = parseBound(ranges?.hi?.max);
 
       // 요율은 meta에 있으면 우선, 없으면 CONFIG_SIM 사용
       const npEmployeeRate = numOr(meta?.np?.employeeRate, CONFIG_SIM.nationalPension.employeeRate);
@@ -210,13 +217,13 @@
       return {
         year: numOr(meta?.year, CONFIG_SIM.year),
         np: {
-          min: Number.isFinite(npMin) ? npMin : null,
-          max: Number.isFinite(npMax) ? npMax : null,
+          min: npMin,
+          max: npMax,
           employeeRate: npEmployeeRate
         },
         hi: {
-          min: Number.isFinite(hiMin) ? hiMin : null,
-          max: Number.isFinite(hiMax) ? hiMax : null,
+          min: hiMin,
+          max: hiMax,
           employeeRate: hiEmployeeRate,
           ltcRateOnHI
         }
@@ -228,17 +235,19 @@
 
       const monthlyBaseRaw = Math.max(0, Number(annualIncomeAmount || 0) / 12);
 
-      // 국민연금: 1,000원 절사 후 clamp(상/하한이 meta에 없으면 "clamp 생략" 대신 raw 사용)
+      // 국민연금: 1,000원 절사
       let npBase = Math.floor(monthlyBaseRaw / 1000) * 1000;
-      if (Number.isFinite(m.np.min) && Number.isFinite(m.np.max)) {
-        npBase = clamp(npBase, m.np.min, m.np.max);
-      }
 
-      // 건강보험: raw clamp
+      // ✅ min/max 각각 적용 (둘 중 하나만 있어도 적용되도록)
+      if (Number.isFinite(m.np.min)) npBase = Math.max(npBase, m.np.min);
+      if (Number.isFinite(m.np.max)) npBase = Math.min(npBase, m.np.max);
+
+      // 건강보험: raw
       let hiBase = monthlyBaseRaw;
-      if (Number.isFinite(m.hi.min) && Number.isFinite(m.hi.max)) {
-        hiBase = clamp(hiBase, m.hi.min, m.hi.max);
-      }
+
+      // ✅ min/max 각각 적용 (둘 중 하나만 있어도 적용되도록)
+      if (Number.isFinite(m.hi.min)) hiBase = Math.max(hiBase, m.hi.min);
+      if (Number.isFinite(m.hi.max)) hiBase = Math.min(hiBase, m.hi.max);
 
       // ✅ 사업주: 2배
       const npRateTotal = (Number(m.np.employeeRate) || 0) * 2;
@@ -400,7 +409,6 @@
         monthlyTax: totalTax / 12,
         annualTaxRate: validate(annualTaxRate),
 
-        // ✅ 국민연금/건강보험료: "현재 표기된 금액의 2배" 요구 반영 완료(위 보험 계산에서 이미 2배 적용)
         annualPension: validate(ins.annualNP),
         monthlyPension: validate(ins.monthlyNP),
 
