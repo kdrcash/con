@@ -30,24 +30,20 @@
     // =========================================================
     // 0) API 설정 (AWS Lambda 연결)
     // =========================================================
-    // ✅ 본인 Lambda URL로 교체하세요.
-    // 예: https://xxxx.lambda-url.us-east-1.on.aws
     const API_BASE = "https://dgrfavjoudnkjfbibm3k3sinfy0wzdmw.lambda-url.us-east-1.on.aws";
 
     // =========================================================
     // 1) 설정 및 상수 (Configuration)
-    //    - 아래 CONFIG_SIM은 "AWS Lambda index.mjs의 CONFIG"를 그대로 반영(동일값 유지 목적)
-    //    - /meta가 요율을 내려주지 않으므로, 프론트는 람다와 값이 동일한지 "연 1회" 맞춰 업데이트하는 방식
     // =========================================================
     const CONFIG_SIM = {
       year: 2025,
 
-      // Lambda CONFIG.nationalPension
+      // Lambda CONFIG.nationalPension (근로자 부담률)
       nationalPension: {
         employeeRate: 0.0450,
       },
 
-      // Lambda CONFIG.healthInsurance (건강보험 + 장기요양(건보의 12.95%))
+      // Lambda CONFIG.healthInsurance (근로자 부담률 + 장기요양(건보의 12.95%))
       healthInsurance: {
         employeeRate: 0.03545,
         ltcRateOnHI: 0.1295,
@@ -145,9 +141,18 @@
 
     const toPercent = (num) => (Number.isFinite(num) ? num.toFixed(1) : '0.0');
 
+    // ✅ 람다식 절사(10원 미만 절사)
+    const trunc10 = (v) => Math.floor((Number(v) || 0) / 10) * 10;
+
+    const clamp = (x, lo, hi) => Math.min(Math.max(x, lo), hi);
+
+    function numOr(v, fallback) {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : fallback;
+    }
+
     // =========================================================
     // 3) (Lambda 기준) 종합소득세 누진세율 계산 (Quick Deduction)
-    //    - Lambda: incomeTaxProgressive(tb, CONFIG)
     // =========================================================
     function calculateProgressiveIncomeTax(tb) {
       const base = Math.max(0, Math.floor(Number(tb) || 0));
@@ -180,9 +185,83 @@
     };
 
     // =========================================================
-    // 5) 핵심 계산 로직 (Core Calculation)
-    //    - 국민연금/건보(장기요양 포함) 요율: Lambda CONFIG 기준
-    //    - 종합소득세·지방세: 소득세 산출 후 1.1배 표기(지방소득세 10% 포함)
+    // ✅ 5) 보험 계산(람다 /meta 반영)
+    //   - 보수월액 = 소득금액/12
+    //   - 국민연금: 1,000원 단위 절사 후 상/하한 적용, 10원 절사
+    //   - 건강보험: 보수월액 상/하한 적용, 10원 절사
+    //   - 장기요양: 건보료 × ltcRateOnHI, 10원 절사
+    //   - 사업주: 근로자 부담률의 2배(= employeeRate*2)
+    // =========================================================
+    function getInsuranceMetaFromLambda() {
+      // 람다 /meta가 보통 { year, ranges: { np:{min,max}, hi:{min,max} }, ... } 형태라고 가정
+      const meta = API_STATUS.meta || {};
+      const ranges = meta.ranges || {};
+
+      const npMin = numOr(ranges?.np?.min, null);
+      const npMax = numOr(ranges?.np?.max, null);
+      const hiMin = numOr(ranges?.hi?.min, null);
+      const hiMax = numOr(ranges?.hi?.max, null);
+
+      // 요율은 meta에 있으면 우선, 없으면 CONFIG_SIM 사용
+      const npEmployeeRate = numOr(meta?.np?.employeeRate, CONFIG_SIM.nationalPension.employeeRate);
+      const hiEmployeeRate = numOr(meta?.hi?.employeeRate, CONFIG_SIM.healthInsurance.employeeRate);
+      const ltcRateOnHI    = numOr(meta?.hi?.ltcRateOnHI, CONFIG_SIM.healthInsurance.ltcRateOnHI);
+
+      return {
+        year: numOr(meta?.year, CONFIG_SIM.year),
+        np: {
+          min: Number.isFinite(npMin) ? npMin : null,
+          max: Number.isFinite(npMax) ? npMax : null,
+          employeeRate: npEmployeeRate
+        },
+        hi: {
+          min: Number.isFinite(hiMin) ? hiMin : null,
+          max: Number.isFinite(hiMax) ? hiMax : null,
+          employeeRate: hiEmployeeRate,
+          ltcRateOnHI
+        }
+      };
+    }
+
+    function calcInsuranceByLambdaRules(annualIncomeAmount) {
+      const m = getInsuranceMetaFromLambda();
+
+      const monthlyBaseRaw = Math.max(0, Number(annualIncomeAmount || 0) / 12);
+
+      // 국민연금: 1,000원 절사 후 clamp(상/하한이 meta에 없으면 "clamp 생략" 대신 raw 사용)
+      let npBase = Math.floor(monthlyBaseRaw / 1000) * 1000;
+      if (Number.isFinite(m.np.min) && Number.isFinite(m.np.max)) {
+        npBase = clamp(npBase, m.np.min, m.np.max);
+      }
+
+      // 건강보험: raw clamp
+      let hiBase = monthlyBaseRaw;
+      if (Number.isFinite(m.hi.min) && Number.isFinite(m.hi.max)) {
+        hiBase = clamp(hiBase, m.hi.min, m.hi.max);
+      }
+
+      // ✅ 사업주: 2배
+      const npRateTotal = (Number(m.np.employeeRate) || 0) * 2;
+      const hiRateTotal = (Number(m.hi.employeeRate) || 0) * 2;
+
+      const monthlyNP  = trunc10(npBase * npRateTotal);
+      const monthlyHI  = trunc10(hiBase * hiRateTotal);
+      const monthlyLTC = trunc10(monthlyHI * (Number(m.hi.ltcRateOnHI) || 0));
+
+      return {
+        monthlyBaseRaw,
+        npBase, hiBase,
+        monthlyNP, annualNP: monthlyNP * 12,
+        monthlyHI, monthlyLTC,
+        annualHI: monthlyHI * 12,
+        annualLTC: monthlyLTC * 12,
+        monthlyInsuranceTotal: monthlyHI + monthlyLTC,
+        annualInsuranceTotal: (monthlyHI + monthlyLTC) * 12,
+      };
+    }
+
+    // =========================================================
+    // 6) 핵심 계산 로직 (Core Calculation)
     // =========================================================
     const calculateResults = (inputs, mode) => {
       const { annualRevenue, monthlyExpense, monthlyRequiredExpense, targetProfitRate, afterTaxNetIncome } = inputs;
@@ -211,10 +290,9 @@
           break;
         }
         case 'mode2': {
-          // (TNI + ReqExp) - Tax(TNI)*1.1 = AfterTaxNetIncome
           const func = (tni) => {
             const incomeTax = calculateProgressiveIncomeTax(tni);
-            const totalTax = incomeTax * 1.1; // 지방세 포함 표기
+            const totalTax = incomeTax * 1.1;
             const ani = tni + annualReqExpInput;
             return ani - totalTax;
           };
@@ -259,7 +337,7 @@
           const targetTaxBurden = actualNetIncome - annualAfterTaxNetIncome;
 
           if (targetTaxBurden > 0) {
-            const func = (tni) => calculateProgressiveIncomeTax(tni) * 1.1; // 지방세 포함
+            const func = (tni) => calculateProgressiveIncomeTax(tni) * 1.1;
             taxBaseIncome = solveBinarySearch(func, targetTaxBurden);
           } else {
             taxBaseIncome = actualNetIncome;
@@ -278,16 +356,12 @@
       const finalANI = validate(actualNetIncome);
       const finalTNI = validate(taxBaseIncome);
 
-      // ✅ 종합소득세(소득세) → 종합소득세·지방세(1.1배)
+      // ✅ 세금(종합소득세·지방세)
       const incomeTax = calculateProgressiveIncomeTax(finalTNI);
-      const totalTax  = incomeTax * 1.1; // 지방소득세 포함 표시(= 1.1배)
+      const totalTax  = incomeTax * 1.1;
 
-      // ✅ 국민연금/건보(장기요양 포함): Lambda CONFIG 값 기준
-      // - 이 시뮬레이터는 "연간 과세표준 기반의 단순 부담률" 모델입니다(월 상·하한/10원절사 등은 미반영).
-      const pensionRate = CONFIG_SIM.nationalPension.employeeRate; // 0.045
-      const healthRate  = CONFIG_SIM.healthInsurance.employeeRate * (1 + CONFIG_SIM.healthInsurance.ltcRateOnHI); // 건보 + 장기요양
-      const pension     = validate(finalTNI * pensionRate);
-      const insurance   = validate(finalTNI * healthRate);
+      // ✅ 보험(람다 /meta 상하한 + 절사 규칙 반영) + 사업주(2배)
+      const ins = calcInsuranceByLambdaRules(finalTNI);
 
       // 세후 순이익
       const finalATNI = validate(finalANI - totalTax);
@@ -297,6 +371,10 @@
 
       // 매출대비 세금비율(연매출 대비 연간 종합소득세·지방세)
       const annualTaxRate = (finalAR !== 0) ? (totalTax / finalAR) * 100 : 0;
+
+      // ✅ 소득금액(카테고리 추가: 실제/목표)
+      const annualIncomeAmountActual = validate(finalAR * (validate(actualPR) / 100));
+      const annualIncomeAmountTarget = validate(finalAR * (finalTPR / 100));
 
       return {
         annualRev: finalAR,
@@ -308,27 +386,31 @@
         annualReqExp: finalMRE * 12,
         monthlyReqExp: finalMRE,
 
+        // ✅ 소득금액(연간) - 실제/목표
+        annualIncomeAmountActual,
+        annualIncomeAmountTarget,
+
         actualProfitRate: validate(actualPR),
         targetProfitRate: finalTPR,
 
         annualNetIncome: finalATNI,
         monthlyNetIncome: finalATNI / 12,
 
-        // ✅ 표기용 세금(종합소득세·지방세)
         annualTax: totalTax,
         monthlyTax: totalTax / 12,
         annualTaxRate: validate(annualTaxRate),
 
-        annualPension: pension,
-        monthlyPension: pension / 12,
+        // ✅ 국민연금/건강보험료: "현재 표기된 금액의 2배" 요구 반영 완료(위 보험 계산에서 이미 2배 적용)
+        annualPension: validate(ins.annualNP),
+        monthlyPension: validate(ins.monthlyNP),
 
-        annualInsurance: insurance,
-        monthlyInsurance: insurance / 12,
+        annualInsurance: validate(ins.annualInsuranceTotal),
+        monthlyInsurance: validate(ins.monthlyInsuranceTotal),
       };
     };
 
     // =========================================================
-    // 6) 상태 관리
+    // 7) 상태 관리
     // =========================================================
     let state = {
       calculationMode: 'mode1',
@@ -349,7 +431,7 @@
     };
 
     // =========================================================
-    // 7) UI 렌더
+    // 8) UI 렌더
     // =========================================================
     const createCard = (title, val1, val2, isPercent, iconKey, color) => {
       const icon = ICON_MAP[iconKey] || iconKey;
@@ -535,7 +617,7 @@
     const renderScenarioTable = () => {
       const tbody = state.domRefs.scenarioTableBody;
       if (state.scenarios.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="21" class="px-6 py-12 text-center text-slate-400 bg-slate-50/30">입력 후 🧮 계산하기를 눌러 시나리오를 추가해주세요.</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="23" class="px-6 py-12 text-center text-slate-400 bg-slate-50/30">입력 후 🧮 계산하기를 눌러 시나리오를 추가해주세요.</td></tr>`;
         return;
       }
 
@@ -560,6 +642,10 @@
 
             <td class="px-2 py-3 text-right text-slate-700 bg-slate-100/50 border-r border-slate-100">${formatCompactCurrency(item.annualReqExp)}</td>
             <td class="px-2 py-3 text-right text-slate-700 bg-slate-100/50 border-r border-slate-100">${formatCompactCurrency(item.monthlyReqExp)}</td>
+
+            <!-- ✅ 소득금액(카테고리) 실제/목표 -->
+            <td class="px-2 py-3 text-right text-slate-700 bg-slate-50/30 border-r border-slate-100">${formatCompactCurrency(item.annualIncomeAmountActual)}</td>
+            <td class="px-2 py-3 text-right text-slate-700 bg-slate-50/30 border-r border-slate-100">${formatCompactCurrency(item.annualIncomeAmountTarget)}</td>
 
             <td class="px-2 py-3 text-right font-bold text-blue-700 bg-blue-50/30 border-r border-slate-100">${formatCompactCurrency(item.annualNetIncome)}</td>
             <td class="px-2 py-3 text-right font-bold text-blue-700 bg-blue-50/30 border-r border-slate-100">${formatCompactCurrency(item.monthlyNetIncome)}</td>
@@ -594,6 +680,7 @@
         '연매출', '월매출',
         '연지출', '월지출',
         '연필요경비', '월필요경비',
+        '소득금액(실제)', '소득금액(목표)',
         '연세후순이익', '월세후순이익', '세후순이익비율(%)',
         '연종합소득세·지방세', '월종합소득세·지방세', '세금비율(연매출대비, %)',
         '연국민연금', '월국민연금',
@@ -611,6 +698,7 @@
           Math.round(s.annualRev), Math.round(s.monthlyRev),
           Math.round(s.annualExp), Math.round(s.monthlyExp),
           Math.round(s.annualReqExp), Math.round(s.monthlyReqExp),
+          Math.round(s.annualIncomeAmountActual), Math.round(s.annualIncomeAmountTarget),
           Math.round(s.annualNetIncome), Math.round(s.monthlyNetIncome),
           Number(toPercent(netRatio)),
           Math.round(s.annualTax), Math.round(s.monthlyTax), Number(toPercent(taxRatio)),
@@ -627,6 +715,7 @@
         { wch: 14 }, { wch: 14 },
         { wch: 14 }, { wch: 14 },
         { wch: 14 }, { wch: 14 },
+        { wch: 16 }, { wch: 16 },
         { wch: 16 }, { wch: 16 }, { wch: 18 },
         { wch: 20 }, { wch: 20 }, { wch: 22 },
         { wch: 14 }, { wch: 14 },
@@ -642,7 +731,7 @@
     };
 
     // =========================================================
-    // 8) API 연결 확인 (health/meta)
+    // 9) API 연결 확인 (health/meta)
     // =========================================================
     async function checkApiConnection() {
       API_STATUS.state = "checking";
@@ -670,7 +759,6 @@
         API_STATUS.message = "Lambda 응답 정상";
         API_STATUS.lastCheckedAt = Date.now();
 
-        // meta.year가 있으면 표시용으로만 반영(계산 요율은 CONFIG_SIM 유지)
         if (meta?.year && Number(meta.year)) {
           CONFIG_SIM.year = Number(meta.year);
         }
@@ -682,13 +770,19 @@
       }
 
       renderApiStatusBadge();
+
+      // ✅ meta 갱신 후 계산값도 즉시 반영(상/하한이 바뀌므로)
+      state.lastCalculatedResults = calculateResults(state.inputs, state.calculationMode);
+      renderDashboard();
+      renderScenarioTable();
     }
 
     // =========================================================
-    // 9) 이벤트/초기화
+    // 10) 이벤트/초기화
     // =========================================================
     const setCalculationMode = (modeId) => {
       state.calculationMode = modeId;
+      state.lastCalculatedResults = calculateResults(state.inputs, state.calculationMode);
       updateInputForm();
       renderModeSelectors();
       renderDashboard();
@@ -822,8 +916,6 @@
           <button id="header-reset-btn" class="text-sm text-slate-500 hover:text-slate-800 px-3 py-2 flex items-center gap-1 transition-colors rounded-lg">
             🔄 초기화
           </button>
-
-          <!-- ✅ "💾 데이터 저장" 버튼 삭제됨 -->
         </div>
       </div>
     </header>
@@ -900,8 +992,7 @@
           <div class="bg-slate-50 border border-slate-200 rounded-xl p-4 text-sm text-slate-600">
             <div class="font-semibold text-slate-700 mb-1">요율/세율 기준</div>
             <ul class="list-disc ml-5 space-y-1 text-[13px]">
-              <li>국민연금(근로자 부담률): <span class="font-semibold">4.50%</span> (Lambda CONFIG 기준)</li>
-              <li>건강보험(근로자 부담률) + 장기요양(건보의 12.95%): <span class="font-semibold">3.545% × (1+0.1295)</span></li>
+              <li>국민연금/건강보험료: <span class="font-semibold">사업주(2배) + /meta 상하한 + 10원 절사 규칙</span> 반영</li>
               <li>종합소득세·지방세: <span class="font-semibold">소득세 산출 × 1.1</span></li>
             </ul>
           </div>
@@ -927,6 +1018,10 @@
                 <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200 bg-slate-100 text-slate-800">매출</th>
                 <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200 bg-slate-100 text-slate-800">지출</th>
                 <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200 bg-slate-100 text-slate-800">필요 경비</th>
+
+                <!-- ✅ 추가: 소득금액(카테고리) -->
+                <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200 bg-slate-50 text-slate-800">소득금액</th>
+
                 <th colspan="3" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200 bg-blue-50 text-blue-800">세후순이익</th>
                 <th colspan="3" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200">종합소득세·지방세</th>
                 <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200">국민연금</th>
@@ -945,6 +1040,10 @@
 
                 <th class="px-2 py-2 text-center border-r border-slate-200 bg-slate-100/50 text-slate-800">연간</th>
                 <th class="px-2 py-2 text-center border-r border-slate-200 bg-slate-100/50 text-slate-800">월간</th>
+
+                <!-- ✅ 소득금액: 실제/목표 -->
+                <th class="px-2 py-2 text-center border-r border-slate-200 bg-slate-50/50 text-slate-800">실제</th>
+                <th class="px-2 py-2 text-center border-r border-slate-200 bg-slate-50/50 text-slate-800">목표</th>
 
                 <th class="px-2 py-2 text-center border-r border-slate-200 bg-blue-50/50 text-blue-800">연간</th>
                 <th class="px-2 py-2 text-center border-r border-slate-200 bg-blue-50/50 text-blue-800">월간</th>
