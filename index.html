@@ -12,76 +12,59 @@
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 
   <style>
-    .sticky-col-1 {
-      left: 0;
-      z-index: 20;
-      box-shadow: 2px 0 5px -2px rgba(0,0,0,0.1);
-    }
-    .sticky-col-2 {
-      left: 40px;
-      z-index: 20;
-      box-shadow: 2px 0 5px -2px rgba(0,0,0,0.1);
-    }
+    .sticky-col-1 { left: 0; z-index: 20; box-shadow: 2px 0 5px -2px rgba(0,0,0,0.1); }
+    .sticky-col-2 { left: 40px; z-index: 20; box-shadow: 2px 0 5px -2px rgba(0,0,0,0.1); }
     .table-container { overflow-x: auto; }
     .sticky-col { position: sticky; }
   </style>
 
   <script>
     // =========================================================
-    // 0) API 설정 (AWS Lambda 연결)
+    // 0) API (Lambda) 설정
     // =========================================================
-    const API_BASE = "https://dgrfavjoudnkjfbibm3k3sinfy0wzdmw.lambda-url.us-east-1.on.aws";
-
-    // =========================================================
-    // 1) 설정 및 상수 (Configuration)
-    // =========================================================
-    const CONFIG_SIM = {
-      year: 2025,
-
-      // Lambda CONFIG.nationalPension (근로자 부담률)
-      nationalPension: {
-        employeeRate: 0.0450,
-      },
-
-      // Lambda CONFIG.healthInsurance (근로자 부담률 + 장기요양(건보의 12.95%))
-      healthInsurance: {
-        employeeRate: 0.03545,
-        ltcRateOnHI: 0.1295,
-      },
-
-      // Lambda CONFIG.progressiveTax (Quick Deduction)
-      progressiveTax: [
-        { upto: 14_000_000,    rate: 0.06, quickDeduction: 0 },
-        { upto: 50_000_000,    rate: 0.15, quickDeduction: 1_260_000 },
-        { upto: 88_000_000,    rate: 0.24, quickDeduction: 5_760_000 },
-        { upto: 150_000_000,   rate: 0.35, quickDeduction: 15_440_000 },
-        { upto: 300_000_000,   rate: 0.38, quickDeduction: 19_940_000 },
-        { upto: 500_000_000,   rate: 0.40, quickDeduction: 25_940_000 },
-        { upto: 1_000_000_000, rate: 0.42, quickDeduction: 35_940_000 },
-        { upto: null,          rate: 0.45, quickDeduction: 65_940_000 },
-      ],
+    const API = {
+      base: "https://dgrfavjoudnkjfbibm3k3sinfy0wzdmw.lambda-url.us-east-1.on.aws",
+      endpoints: {
+        meta: "/meta",
+        health: "/health"
+      }
     };
 
-    // API 상태 표시용
-    const API_STATUS = {
-      state: "idle", // idle | checking | ok | error
-      message: "연결 확인 전",
+    // =========================================================
+    // 1) 동적 설정(전부 API에서 주입) - ✅ 하드코딩 제거
+    // =========================================================
+    const DYN = {
+      ready: false,
+      error: null,
+      year: null,
+
+      // 누진세율표(Quick Deduction) : [{upto, rate, quickDeduction}, ...]
+      progressiveTax: null,
+
+      // 보험 요율
+      np: { employeeRate: null, min: null, max: null },
+      hi: { employeeRate: null, ltcRateOnHI: null, min: null, max: null },
+
+      // raw meta 보관(디버깅/표시용)
       meta: null,
       health: null,
-      lastCheckedAt: null
+      lastFetchedAt: null
     };
 
+    // =========================================================
+    // 2) UI/로직 상수
+    // =========================================================
     const EMPTY_INPUTS = {
       annualRevenue: 0, monthlyExpense: 0, monthlyRequiredExpense: 0,
       targetProfitRate: 0, afterTaxNetIncome: 0,
     };
 
     const INPUT_FIELDS = [
-      { name: 'annualRevenue', isCurrency: true, resultName: 'annualRev' },
-      { name: 'monthlyExpense', isCurrency: true, resultName: 'monthlyExp' },
-      { name: 'monthlyRequiredExpense', isCurrency: true, resultName: 'monthlyReqExp' },
-      { name: 'targetProfitRate', isCurrency: false, resultName: 'targetProfitRate' },
-      { name: 'afterTaxNetIncome', isCurrency: true, resultName: 'monthlyNetIncome' }
+      { name: 'annualRevenue', resultName: 'annualRev' },
+      { name: 'monthlyExpense', resultName: 'monthlyExp' },
+      { name: 'monthlyRequiredExpense', resultName: 'monthlyReqExp' },
+      { name: 'targetProfitRate', resultName: 'targetProfitRate' },
+      { name: 'afterTaxNetIncome', resultName: 'monthlyNetIncome' }
     ];
 
     const DASHBOARD_CONFIG = {
@@ -117,73 +100,153 @@
 
     const ICON_MAP = {
       'TrendingUp': '📈', 'PieChart': '📊', 'Calculator': '🧮',
-      'DollarSign': '💰', 'Target': '🎯', 'Activity': '💡',
-      'FileText': '📄', 'RotateCcw': '🔄', 'Plus': '➕',
-      'Trash2': '🗑️', 'Save': '💾', 'ArrowRightCircle': '➡️'
+      'DollarSign': '💰', 'Target': '🎯', 'FileText': '📄',
     };
 
     // =========================================================
-    // 2) 유틸리티 함수
+    // 3) 유틸
     // =========================================================
     const formatCurrency = (val) => new Intl.NumberFormat('ko-KR', { style: 'currency', currency: 'KRW' }).format(val);
-
-    const formatCompactCurrency = (val) => {
-      if (!val) return '0';
-      return new Intl.NumberFormat('ko-KR', { style: 'decimal', maximumFractionDigits: 0 }).format(val);
-    };
-
+    const formatCompactCurrency = (val) => (!val ? '0' : new Intl.NumberFormat('ko-KR', { style: 'decimal', maximumFractionDigits: 0 }).format(val));
     const validate = (val) => Number.isFinite(val) ? val : 0;
-
-    const formatRate = (rate) => {
-      const numericRate = parseFloat(rate);
-      return (Number.isFinite(numericRate) ? numericRate : 0).toFixed(1);
-    };
-
+    const formatRate = (rate) => (Number.isFinite(Number(rate)) ? Number(rate) : 0).toFixed(1);
     const toPercent = (num) => (Number.isFinite(num) ? num.toFixed(1) : '0.0');
-
-    // ✅ 람다식 절사(10원 미만 절사)
     const trunc10 = (v) => Math.floor((Number(v) || 0) / 10) * 10;
 
-    const clamp = (x, lo, hi) => Math.min(Math.max(x, lo), hi);
-
-    function numOr(v, fallback) {
-      const n = Number(v);
-      return Number.isFinite(n) ? n : fallback;
-    }
-
-    // ✅ null/undefined/""는 숫자로 보지 않도록(상하한 파싱 안정화)
     function parseBound(v) {
       if (v === null || v === undefined || v === '') return null;
       const n = Number(v);
       return Number.isFinite(n) ? n : null;
     }
 
+    function ensureFiniteOrNull(v) {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    }
+
     // =========================================================
-    // 3) (Lambda 기준) 종합소득세 누진세율 계산 (Quick Deduction)
+    // 4) API -> 동적설정 주입 (핵심: 여기만 키 매핑 수정하면 됨)
+    // =========================================================
+    function pickProgressiveTax(meta) {
+      // meta 구조가 다를 수 있으니 후보 키를 여러 개 지원
+      const candidates = [
+        meta?.progressiveTax,
+        meta?.tax?.progressiveTax,
+        meta?.tax?.progressive,
+        meta?.progressiveTaxTable,
+        meta?.incomeTax?.progressiveTax
+      ];
+      const arr = candidates.find(v => Array.isArray(v) && v.length);
+      return arr || null;
+    }
+
+    function normalizeMeta(meta) {
+      const ranges = meta?.ranges || meta?.insuranceRanges || {};
+
+      const npMin = parseBound(ranges?.np?.min);
+      const npMax = parseBound(ranges?.np?.max);
+      const hiMin = parseBound(ranges?.hi?.min);
+      const hiMax = parseBound(ranges?.hi?.max);
+
+      const npEmployeeRate = ensureFiniteOrNull(meta?.np?.employeeRate);
+      const hiEmployeeRate = ensureFiniteOrNull(meta?.hi?.employeeRate);
+      const ltcRateOnHI    = ensureFiniteOrNull(meta?.hi?.ltcRateOnHI);
+
+      const progressiveTax = pickProgressiveTax(meta);
+
+      return {
+        year: ensureFiniteOrNull(meta?.year),
+        progressiveTax,
+        np: { employeeRate: npEmployeeRate, min: npMin, max: npMax },
+        hi: { employeeRate: hiEmployeeRate, ltcRateOnHI, min: hiMin, max: hiMax }
+      };
+    }
+
+    function validateDynReady() {
+      // 세율/요율/표가 하나라도 없으면 "정확한 계산" 불가 → 계산 버튼 막기
+      if (!DYN.year) return "meta.year 누락";
+      if (!Array.isArray(DYN.progressiveTax) || !DYN.progressiveTax.length) return "meta.progressiveTax(누진세율표) 누락";
+      if (!Number.isFinite(DYN.np.employeeRate)) return "meta.np.employeeRate 누락";
+      if (!Number.isFinite(DYN.hi.employeeRate)) return "meta.hi.employeeRate 누락";
+      if (!Number.isFinite(DYN.hi.ltcRateOnHI)) return "meta.hi.ltcRateOnHI 누락";
+      return null;
+    }
+
+    async function fetchMetaAndHealth() {
+      DYN.ready = false;
+      DYN.error = null;
+      DYN.lastFetchedAt = Date.now();
+      renderApiStatusBadge();
+
+      try {
+        const [healthRes, metaRes] = await Promise.all([
+          fetch(API.base + API.endpoints.health, { method: "GET" }),
+          fetch(API.base + API.endpoints.meta, { method: "GET" })
+        ]);
+
+        if (!healthRes.ok || !metaRes.ok) {
+          throw new Error(`http_error (health=${healthRes.status}, meta=${metaRes.status})`);
+        }
+
+        const health = await healthRes.json();
+        const meta = await metaRes.json();
+
+        DYN.health = health;
+        DYN.meta = meta;
+
+        const norm = normalizeMeta(meta);
+        DYN.year = norm.year;
+        DYN.progressiveTax = norm.progressiveTax;
+
+        DYN.np.employeeRate = norm.np.employeeRate;
+        DYN.np.min = norm.np.min;
+        DYN.np.max = norm.np.max;
+
+        DYN.hi.employeeRate = norm.hi.employeeRate;
+        DYN.hi.ltcRateOnHI = norm.hi.ltcRateOnHI;
+        DYN.hi.min = norm.hi.min;
+        DYN.hi.max = norm.hi.max;
+
+        const err = validateDynReady();
+        if (err) {
+          DYN.error = err;
+          DYN.ready = false;
+        } else {
+          DYN.ready = true;
+        }
+
+      } catch (e) {
+        DYN.error = "Lambda 연결 실패(도메인/CORS/경로 확인)";
+        DYN.ready = false;
+      }
+
+      renderApiStatusBadge();
+      refreshAll();
+    }
+
+    // =========================================================
+    // 5) 세금/보험 계산 (로직 유지, 데이터만 DYN에서 주입)
     // =========================================================
     function calculateProgressiveIncomeTax(tb) {
+      // DYN.ready가 false면 이 함수가 호출되면 안됨(계산 버튼 막음)
       const base = Math.max(0, Math.floor(Number(tb) || 0));
-      for (const s of CONFIG_SIM.progressiveTax) {
-        if (s.upto === null || base <= s.upto) {
-          const tax = Math.floor(base * s.rate - s.quickDeduction);
+      for (const s of DYN.progressiveTax) {
+        const upto = (s.upto === null || s.upto === undefined) ? null : Number(s.upto);
+        if (upto === null || base <= upto) {
+          const tax = Math.floor(base * Number(s.rate) - Number(s.quickDeduction));
           return Math.max(0, tax);
         }
       }
       return 0;
     }
 
-    // =========================================================
-    // 4) 목표값 찾기 (Binary Search)
-    // =========================================================
     const solveBinarySearch = (func, targetValue) => {
       let low = 0;
       let high = 100_000_000_000; // 1000억
       let mid = 0;
-
       for (let i = 0; i < 100; i++) {
         mid = (low + high) / 2;
         const result = func(mid);
-
         if (Math.abs(result - targetValue) < 10) break;
         if (result < targetValue) low = mid;
         else high = mid;
@@ -191,88 +254,53 @@
       return mid;
     };
 
-    // =========================================================
-    // ✅ 5) 보험 계산(람다 /meta 반영)
-    //   - 보수월액 = 소득금액/12
-    //   - 국민연금: 1,000원 단위 절사 후 상/하한 적용, 10원 절사
-    //   - 건강보험: 보수월액 상/하한 적용, 10원 절사
-    //   - 장기요양: 건보료 × ltcRateOnHI, 10원 절사
-    //   - 사업주: 근로자 부담률의 2배(= employeeRate*2)
-    // =========================================================
-    function getInsuranceMetaFromLambda() {
-      const meta = API_STATUS.meta || {};
-      const ranges = meta.ranges || {};
-
-      // ✅ 상/하한 파싱(없으면 null)
-      const npMin = parseBound(ranges?.np?.min);
-      const npMax = parseBound(ranges?.np?.max);
-      const hiMin = parseBound(ranges?.hi?.min);
-      const hiMax = parseBound(ranges?.hi?.max);
-
-      // 요율은 meta에 있으면 우선, 없으면 CONFIG_SIM 사용
-      const npEmployeeRate = numOr(meta?.np?.employeeRate, CONFIG_SIM.nationalPension.employeeRate);
-      const hiEmployeeRate = numOr(meta?.hi?.employeeRate, CONFIG_SIM.healthInsurance.employeeRate);
-      const ltcRateOnHI    = numOr(meta?.hi?.ltcRateOnHI, CONFIG_SIM.healthInsurance.ltcRateOnHI);
-
-      return {
-        year: numOr(meta?.year, CONFIG_SIM.year),
-        np: {
-          min: npMin,
-          max: npMax,
-          employeeRate: npEmployeeRate
-        },
-        hi: {
-          min: hiMin,
-          max: hiMax,
-          employeeRate: hiEmployeeRate,
-          ltcRateOnHI
-        }
-      };
-    }
-
-    function calcInsuranceByLambdaRules(annualIncomeAmount) {
-      const m = getInsuranceMetaFromLambda();
-
+    function calcInsuranceByRules(annualIncomeAmount) {
       const monthlyBaseRaw = Math.max(0, Number(annualIncomeAmount || 0) / 12);
 
       // 국민연금: 1,000원 절사
       let npBase = Math.floor(monthlyBaseRaw / 1000) * 1000;
-
-      // ✅ min/max 각각 적용 (둘 중 하나만 있어도 적용되도록)
-      if (Number.isFinite(m.np.min)) npBase = Math.max(npBase, m.np.min);
-      if (Number.isFinite(m.np.max)) npBase = Math.min(npBase, m.np.max);
+      if (Number.isFinite(DYN.np.min)) npBase = Math.max(npBase, DYN.np.min);
+      if (Number.isFinite(DYN.np.max)) npBase = Math.min(npBase, DYN.np.max);
 
       // 건강보험: raw
       let hiBase = monthlyBaseRaw;
+      if (Number.isFinite(DYN.hi.min)) hiBase = Math.max(hiBase, DYN.hi.min);
+      if (Number.isFinite(DYN.hi.max)) hiBase = Math.min(hiBase, DYN.hi.max);
 
-      // ✅ min/max 각각 적용 (둘 중 하나만 있어도 적용되도록)
-      if (Number.isFinite(m.hi.min)) hiBase = Math.max(hiBase, m.hi.min);
-      if (Number.isFinite(m.hi.max)) hiBase = Math.min(hiBase, m.hi.max);
-
-      // ✅ 사업주: 2배
-      const npRateTotal = (Number(m.np.employeeRate) || 0) * 2;
-      const hiRateTotal = (Number(m.hi.employeeRate) || 0) * 2;
+      // 사업주: 2배
+      const npRateTotal = (Number(DYN.np.employeeRate) || 0) * 2;
+      const hiRateTotal = (Number(DYN.hi.employeeRate) || 0) * 2;
 
       const monthlyNP  = trunc10(npBase * npRateTotal);
       const monthlyHI  = trunc10(hiBase * hiRateTotal);
-      const monthlyLTC = trunc10(monthlyHI * (Number(m.hi.ltcRateOnHI) || 0));
+      const monthlyLTC = trunc10(monthlyHI * (Number(DYN.hi.ltcRateOnHI) || 0));
 
       return {
         monthlyBaseRaw,
         npBase, hiBase,
         monthlyNP, annualNP: monthlyNP * 12,
         monthlyHI, monthlyLTC,
-        annualHI: monthlyHI * 12,
-        annualLTC: monthlyLTC * 12,
-        monthlyInsuranceTotal: monthlyHI + monthlyLTC,
         annualInsuranceTotal: (monthlyHI + monthlyLTC) * 12,
+        monthlyInsuranceTotal: (monthlyHI + monthlyLTC),
       };
     }
 
-    // =========================================================
-    // 6) 핵심 계산 로직 (Core Calculation)
-    // =========================================================
     const calculateResults = (inputs, mode) => {
+      // ✅ 정확도 보장을 위해: DYN 미준비면 계산 자체를 하지 않음
+      if (!DYN.ready) {
+        return {
+          annualRev: 0, monthlyRev: 0,
+          annualExp: (inputs.monthlyExpense||0)*12, monthlyExp: (inputs.monthlyExpense||0),
+          annualReqExp: (inputs.monthlyRequiredExpense||0)*12, monthlyReqExp: (inputs.monthlyRequiredExpense||0),
+          annualIncomeAmountActual: 0, annualIncomeAmountTarget: 0,
+          actualProfitRate: 0, targetProfitRate: (inputs.targetProfitRate||0),
+          annualNetIncome: 0, monthlyNetIncome: 0,
+          annualTax: 0, monthlyTax: 0, annualTaxRate: 0,
+          annualPension: 0, monthlyPension: 0,
+          annualInsurance: 0, monthlyInsurance: 0,
+        };
+      }
+
       const { annualRevenue, monthlyExpense, monthlyRequiredExpense, targetProfitRate, afterTaxNetIncome } = inputs;
 
       const annualExp = monthlyExpense * 12;
@@ -358,30 +386,21 @@
         }
       }
 
-      // 최종 값 보정
       const finalAR  = validate(calcAR);
       const finalMRE = validate(calcMRE);
       const finalTPR = validate(calcTPR);
       const finalANI = validate(actualNetIncome);
       const finalTNI = validate(taxBaseIncome);
 
-      // ✅ 세금(종합소득세·지방세)
       const incomeTax = calculateProgressiveIncomeTax(finalTNI);
       const totalTax  = incomeTax * 1.1;
 
-      // ✅ 보험(람다 /meta 상하한 + 절사 규칙 반영) + 사업주(2배)
-      const ins = calcInsuranceByLambdaRules(finalTNI);
+      const ins = calcInsuranceByRules(finalTNI);
 
-      // 세후 순이익
       const finalATNI = validate(finalANI - totalTax);
-
-      // 실제 소득률 (ANI / AR)
       const actualPR = (finalAR !== 0) ? (finalANI / finalAR) * 100 : 0;
-
-      // 매출대비 세금비율(연매출 대비 연간 종합소득세·지방세)
       const annualTaxRate = (finalAR !== 0) ? (totalTax / finalAR) * 100 : 0;
 
-      // ✅ 소득금액(카테고리 추가: 실제/목표)
       const annualIncomeAmountActual = validate(finalAR * (validate(actualPR) / 100));
       const annualIncomeAmountTarget = validate(finalAR * (finalTPR / 100));
 
@@ -395,7 +414,6 @@
         annualReqExp: finalMRE * 12,
         monthlyReqExp: finalMRE,
 
-        // ✅ 소득금액(연간) - 실제/목표
         annualIncomeAmountActual,
         annualIncomeAmountTarget,
 
@@ -418,7 +436,7 @@
     };
 
     // =========================================================
-    // 7) 상태 관리
+    // 6) 상태
     // =========================================================
     let state = {
       calculationMode: 'mode1',
@@ -439,7 +457,7 @@
     };
 
     // =========================================================
-    // 8) UI 렌더
+    // 7) UI 렌더
     // =========================================================
     const createCard = (title, val1, val2, isPercent, iconKey, color) => {
       const icon = ICON_MAP[iconKey] || iconKey;
@@ -467,7 +485,7 @@
         </div>`;
     };
 
-    const createFixedResultCard = (title, value1Label, value1, value2Label, value2, iconKey, colorText="text-slate-800") => {
+    const createFixedResultCard = (title, v1Label, v1, v2Label, v2, iconKey) => {
       const icon = ICON_MAP[iconKey] || iconKey;
       if (title === '소득률') {
         return `
@@ -479,11 +497,11 @@
             <div class="space-y-3">
               <div class="flex justify-between items-center border-b border-slate-100 pb-2">
                 <span class="text-xs text-slate-400">실제소득률</span>
-                <span class="text-lg font-bold text-slate-800">${value1}</span>
+                <span class="text-lg font-bold text-slate-800">${v1}</span>
               </div>
               <div class="flex justify-between items-center">
                 <span class="text-xs text-slate-400">목표소득률</span>
-                <span class="text-lg font-bold text-slate-800">${value2}</span>
+                <span class="text-lg font-bold text-slate-800">${v2}</span>
               </div>
             </div>
           </div>`;
@@ -496,13 +514,13 @@
           </h4>
           <div class="space-y-3">
             <div class="flex justify-between items-center border-b border-slate-100 pb-2">
-              <span class="text-xs text-slate-400">${value1Label}</span>
-              <span class="text-lg font-bold ${colorText}">${value1}</span>
+              <span class="text-xs text-slate-400">${v1Label}</span>
+              <span class="text-lg font-bold text-slate-800">${v1}</span>
             </div>
-            ${value2Label ? `
+            ${v2Label ? `
               <div class="flex justify-between items-center">
-                <span class="text-xs text-slate-400">${value2Label}</span>
-                <span class="text-lg font-bold ${colorText}">${value2}</span>
+                <span class="text-xs text-slate-400">${v2Label}</span>
+                <span class="text-lg font-bold text-slate-800">${v2}</span>
               </div>
             ` : ''}
           </div>
@@ -512,30 +530,52 @@
     function renderApiStatusBadge() {
       const el = state.domRefs.apiStatusBadge;
       const sub = state.domRefs.apiStatusSub;
+      const btnCalc = state.domRefs.addScenarioBtn;
 
       if (!el || !sub) return;
 
-      const s = API_STATUS.state;
-      const msg = API_STATUS.message;
+      const checking = !DYN.ready && !DYN.error && DYN.lastFetchedAt;
+      const ok = DYN.ready;
+      const error = !!DYN.error;
 
       const cls =
-        s === "ok" ? "bg-emerald-50 text-emerald-700 border-emerald-200" :
-        s === "checking" ? "bg-amber-50 text-amber-700 border-amber-200" :
-        s === "error" ? "bg-red-50 text-red-700 border-red-200" :
+        ok ? "bg-emerald-50 text-emerald-700 border-emerald-200" :
+        checking ? "bg-amber-50 text-amber-700 border-amber-200" :
+        error ? "bg-red-50 text-red-700 border-red-200" :
         "bg-slate-50 text-slate-600 border-slate-200";
 
       el.className = `text-xs font-semibold px-3 py-1.5 rounded-full border ${cls} flex items-center gap-2`;
       el.innerHTML = `
-        <span class="inline-block h-2 w-2 rounded-full ${s==="ok"?"bg-emerald-500":s==="checking"?"bg-amber-500":s==="error"?"bg-red-500":"bg-slate-400"}"></span>
-        API ${s === "ok" ? "연결됨" : s === "checking" ? "확인중" : s === "error" ? "오류" : "대기"}
+        <span class="inline-block h-2 w-2 rounded-full ${ok?"bg-emerald-500":checking?"bg-amber-500":error?"bg-red-500":"bg-slate-400"}"></span>
+        API ${ok ? "연결됨" : checking ? "확인중" : error ? "오류" : "대기"}
       `;
 
-      const year = API_STATUS.meta?.year ?? CONFIG_SIM.year;
-      const taxTableReady = API_STATUS.health?.taxTableReady;
-      const taxTableTxt = (typeof taxTableReady === "boolean") ? (taxTableReady ? "세액표 OK" : "세액표 없음(폴백)") : "세액표 ?";
+      const checked = DYN.lastFetchedAt ? new Date(DYN.lastFetchedAt).toLocaleString() : "-";
+      const yearTxt = DYN.year ? `year=${DYN.year}` : "year=?";
+      const detail = ok ? "meta 로드 완료" : (DYN.error ? DYN.error : "meta 로딩중");
+      sub.textContent = `${detail} · ${yearTxt} · ${checked}`;
 
-      const checked = API_STATUS.lastCheckedAt ? new Date(API_STATUS.lastCheckedAt).toLocaleString() : "-";
-      sub.textContent = `${msg} · year=${year} · ${taxTableTxt} · ${checked}`;
+      // ✅ meta 없으면 계산 버튼 비활성화(오류/왜곡 방지)
+      if (btnCalc) {
+        btnCalc.disabled = !DYN.ready;
+        btnCalc.className = btnCalc.className.replace(/\sopacity-\S+/g,'').replace(/\spointer-events-\S+/g,'');
+        if (!DYN.ready) btnCalc.className += " opacity-50 pointer-events-none";
+      }
+
+      // 도움문구(요율/세율 기준)도 API 기반으로 표기 바꾸기
+      const guide = document.getElementById("rate-guide-text");
+      if (guide) {
+        if (DYN.ready) {
+          guide.innerHTML = `
+            <li>국민연금/건강보험료: <span class="font-semibold">사업주(2배) + meta 상하한 + 10원 절사 규칙</span> 반영</li>
+            <li>종합소득세·지방세: <span class="font-semibold">소득세 산출 × 1.1</span></li>
+          `;
+        } else {
+          guide.innerHTML = `
+            <li class="text-red-600">현재 meta 미로딩 상태입니다. (세율/요율/상하한/누진표가 없으면 정확한 계산이 불가능)</li>
+          `;
+        }
+      }
     }
 
     const renderDashboard = () => {
@@ -550,9 +590,6 @@
 
       const actRate = `${formatRate(res.actualProfitRate)}%`;
       const tgtRate = `${formatRate(res.targetProfitRate)}%`;
-      const industryAvg = 40;
-      const diff = industryAvg - res.actualProfitRate;
-      const diffText = diff > 0 ? '낮습니다' : '높습니다';
 
       const fixedCardsHtml = `
         ${createFixedResultCard("소득률", null, actRate, null, tgtRate, "PieChart")}
@@ -566,6 +603,11 @@
 
       const modeLabel = SIMULATION_MODES.find(m => m.id === state.calculationMode)?.label || '';
       state.domRefs.dashboardInsightMode.textContent = modeLabel.split('.')[1]?.trim() || modeLabel;
+
+      const industryAvg = 40;
+      const diff = industryAvg - res.actualProfitRate;
+      const diffText = diff > 0 ? '낮습니다' : '높습니다';
+
       state.domRefs.dashboardInsightText.innerHTML =
         `현재 소득률(<strong>${actRate}</strong>)은 동종 업계 평균(${industryAvg}%) 대비 <strong>${Math.abs(diff).toFixed(1)}%</strong> ${diffText}.<br/>
          필요경비를 <strong>₩${formatCompactCurrency(res.monthlyReqExp)}</strong>으로 유지할 경우, 목표 소득률 달성을 위해 연매출 <strong>₩${formatCompactCurrency(res.annualRev)}</strong>이 필요합니다.`;
@@ -609,7 +651,7 @@
         const labelClass = isActive ? 'text-blue-700' : 'text-slate-700';
         const indicator = isActive ? '<div class="h-2 w-2 rounded-full bg-blue-600 animate-pulse mt-1"></div>' : '';
         return `
-          <button onclick="setCalculationMode('${mode.id}')" class="mode-btn relative p-4 rounded-xl border-2 text-left transition-all group ${activeClass}" data-mode="${mode.id}">
+          <button class="mode-btn relative p-4 rounded-xl border-2 text-left transition-all group ${activeClass}" data-mode="${mode.id}">
             <div class="flex justify-between items-start mb-2">
               <div class="flex items-center gap-2">
                 <div class="p-1.5 rounded-lg ${iconClass}">${mode.icon}</div>
@@ -651,7 +693,6 @@
             <td class="px-2 py-3 text-right text-slate-700 bg-slate-100/50 border-r border-slate-100">${formatCompactCurrency(item.annualReqExp)}</td>
             <td class="px-2 py-3 text-right text-slate-700 bg-slate-100/50 border-r border-slate-100">${formatCompactCurrency(item.monthlyReqExp)}</td>
 
-            <!-- ✅ 소득금액(카테고리) 실제/목표 -->
             <td class="px-2 py-3 text-right text-slate-700 bg-slate-50/30 border-r border-slate-100">${formatCompactCurrency(item.annualIncomeAmountActual)}</td>
             <td class="px-2 py-3 text-right text-slate-700 bg-slate-50/30 border-r border-slate-100">${formatCompactCurrency(item.annualIncomeAmountTarget)}</td>
 
@@ -716,7 +757,6 @@
       });
 
       const ws = XLSX.utils.aoa_to_sheet([header, ...rows]);
-
       ws['!cols'] = [
         { wch: 5 }, { wch: 24 },
         { wch: 14 }, { wch: 14 },
@@ -739,62 +779,20 @@
     };
 
     // =========================================================
-    // 9) API 연결 확인 (health/meta)
+    // 8) 이벤트/초기화
     // =========================================================
-    async function checkApiConnection() {
-      API_STATUS.state = "checking";
-      API_STATUS.message = "Lambda health/meta 확인중";
-      API_STATUS.lastCheckedAt = Date.now();
-      renderApiStatusBadge();
-
-      try {
-        const [healthRes, metaRes] = await Promise.all([
-          fetch(`${API_BASE}/health`, { method: "GET" }),
-          fetch(`${API_BASE}/meta`, { method: "GET" })
-        ]);
-
-        if (!healthRes.ok || !metaRes.ok) {
-          throw new Error(`http_error (health=${healthRes.status}, meta=${metaRes.status})`);
-        }
-
-        const health = await healthRes.json();
-        const meta = await metaRes.json();
-
-        API_STATUS.health = health;
-        API_STATUS.meta = meta;
-
-        API_STATUS.state = "ok";
-        API_STATUS.message = "Lambda 응답 정상";
-        API_STATUS.lastCheckedAt = Date.now();
-
-        if (meta?.year && Number(meta.year)) {
-          CONFIG_SIM.year = Number(meta.year);
-        }
-
-      } catch (e) {
-        API_STATUS.state = "error";
-        API_STATUS.message = "Lambda 연결 실패(도메인/CORS/경로 확인)";
-        API_STATUS.lastCheckedAt = Date.now();
-      }
-
-      renderApiStatusBadge();
-
-      // ✅ meta 갱신 후 계산값도 즉시 반영(상/하한이 바뀌므로)
+    function refreshAll() {
       state.lastCalculatedResults = calculateResults(state.inputs, state.calculationMode);
+      updateInputForm();
       renderDashboard();
       renderScenarioTable();
     }
 
-    // =========================================================
-    // 10) 이벤트/초기화
-    // =========================================================
-    const setCalculationMode = (modeId) => {
+    function setCalculationMode(modeId) {
       state.calculationMode = modeId;
-      state.lastCalculatedResults = calculateResults(state.inputs, state.calculationMode);
-      updateInputForm();
+      refreshAll();
       renderModeSelectors();
-      renderDashboard();
-    };
+    }
 
     const handleInput = (e) => {
       const { name, value, type } = e.target;
@@ -817,6 +815,8 @@
     };
 
     const handleAddScenario = () => {
+      if (!DYN.ready) return;
+
       const results = calculateResults(state.inputs, state.calculationMode);
       state.lastCalculatedResults = results;
 
@@ -836,9 +836,7 @@
 
     const handleResetInputs = () => {
       state.inputs = { ...EMPTY_INPUTS };
-      state.lastCalculatedResults = calculateResults(EMPTY_INPUTS, 'mode1');
-      updateInputForm();
-      renderDashboard();
+      refreshAll();
     };
 
     const handleClearScenarios = () => {
@@ -858,8 +856,6 @@
         headerResetBtn: document.getElementById('header-reset-btn'),
         clearScenariosBtn: document.getElementById('clear-scenarios-btn'),
         excelBtn: document.getElementById('excel-download-btn'),
-
-        // API 상태 표시
         apiStatusBadge: document.getElementById('api-status-badge'),
         apiStatusSub: document.getElementById('api-status-sub'),
         apiRetryBtn: document.getElementById('api-retry-btn'),
@@ -867,10 +863,7 @@
 
       INPUT_FIELDS.forEach(field => {
         const el = document.querySelector(`[name="${field.name}"]`);
-        if (el) {
-          state.domRefs[`${field.name}Input`] = el;
-          el.addEventListener('input', handleInput);
-        }
+        if (el) el.addEventListener('input', handleInput);
       });
 
       state.domRefs.addScenarioBtn.addEventListener('click', handleAddScenario);
@@ -878,7 +871,7 @@
       state.domRefs.headerResetBtn.addEventListener('click', handleResetInputs);
       state.domRefs.clearScenariosBtn.addEventListener('click', handleClearScenarios);
       state.domRefs.excelBtn.addEventListener('click', exportScenariosToExcel);
-      state.domRefs.apiRetryBtn.addEventListener('click', checkApiConnection);
+      state.domRefs.apiRetryBtn.addEventListener('click', fetchMetaAndHealth);
 
       document.addEventListener('click', (e) => {
         const modeBtn = e.target.closest('.mode-btn');
@@ -888,12 +881,12 @@
       });
 
       renderModeSelectors();
-      updateInputForm();
-      renderDashboard();
+      renderApiStatusBadge(); // 초기 상태(버튼 잠금)
+      refreshAll();
       renderScenarioTable();
 
-      // ✅ 로딩 시 API 연결 확인
-      checkApiConnection();
+      // ✅ 로딩 시 meta/health 로드
+      fetchMetaAndHealth();
     };
   </script>
 </head>
@@ -912,7 +905,6 @@
         </div>
 
         <div class="flex items-center gap-3">
-          <!-- ✅ API 연결상태 배지 -->
           <div id="api-status-badge" class="text-xs font-semibold px-3 py-1.5 rounded-full border bg-slate-50 text-slate-600 border-slate-200 flex items-center gap-2">
             <span class="inline-block h-2 w-2 rounded-full bg-slate-400"></span> API 대기
           </div>
@@ -999,10 +991,7 @@
 
           <div class="bg-slate-50 border border-slate-200 rounded-xl p-4 text-sm text-slate-600">
             <div class="font-semibold text-slate-700 mb-1">요율/세율 기준</div>
-            <ul class="list-disc ml-5 space-y-1 text-[13px]">
-              <li>국민연금/건강보험료: <span class="font-semibold">사업주(2배) + /meta 상하한 + 10원 절사 규칙</span> 반영</li>
-              <li>종합소득세·지방세: <span class="font-semibold">소득세 산출 × 1.1</span></li>
-            </ul>
+            <ul id="rate-guide-text" class="list-disc ml-5 space-y-1 text-[13px]"></ul>
           </div>
         </div>
       </div>
@@ -1026,10 +1015,7 @@
                 <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200 bg-slate-100 text-slate-800">매출</th>
                 <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200 bg-slate-100 text-slate-800">지출</th>
                 <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200 bg-slate-100 text-slate-800">필요 경비</th>
-
-                <!-- ✅ 추가: 소득금액(카테고리) -->
                 <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200 bg-slate-50 text-slate-800">소득금액</th>
-
                 <th colspan="3" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200 bg-blue-50 text-blue-800">세후순이익</th>
                 <th colspan="3" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200">종합소득세·지방세</th>
                 <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200">국민연금</th>
@@ -1049,7 +1035,6 @@
                 <th class="px-2 py-2 text-center border-r border-slate-200 bg-slate-100/50 text-slate-800">연간</th>
                 <th class="px-2 py-2 text-center border-r border-slate-200 bg-slate-100/50 text-slate-800">월간</th>
 
-                <!-- ✅ 소득금액: 실제/목표 -->
                 <th class="px-2 py-2 text-center border-r border-slate-200 bg-slate-50/50 text-slate-800">실제</th>
                 <th class="px-2 py-2 text-center border-r border-slate-200 bg-slate-50/50 text-slate-800">목표</th>
 
