@@ -56,6 +56,18 @@
       targetProfitRate: 0, afterTaxNetIncome: 0,
     };
 
+    const EMPTY_RESULTS = {
+      annualRev: 0, monthlyRev: 0,
+      annualExp: 0, monthlyExp: 0,
+      annualReqExp: 0, monthlyReqExp: 0,
+      annualIncomeAmountActual: 0, annualIncomeAmountTarget: 0,
+      actualProfitRate: 0, targetProfitRate: 0,
+      annualNetIncome: 0, monthlyNetIncome: 0,
+      annualTax: 0, monthlyTax: 0, annualTaxRate: 0,
+      annualPension: 0, monthlyPension: 0,
+      annualInsurance: 0, monthlyInsurance: 0,
+    };
+
     const INPUT_FIELDS = [
       { name: 'annualRevenue', isCurrency: true, resultName: 'annualRev' },
       { name: 'monthlyExpense', isCurrency: true, resultName: 'monthlyExp' },
@@ -116,20 +128,9 @@
     let state = {
       calculationMode: 'mode1',
       inputs: { ...EMPTY_INPUTS },
-      lastCalculatedResults: {
-        annualRev: 0, monthlyRev: 0,
-        annualExp: 0, monthlyExp: 0,
-        annualReqExp: 0, monthlyReqExp: 0,
-        annualIncomeAmountActual: 0, annualIncomeAmountTarget: 0,
-        actualProfitRate: 0, targetProfitRate: 0,
-        annualNetIncome: 0, monthlyNetIncome: 0,
-        annualTax: 0, monthlyTax: 0, annualTaxRate: 0,
-        annualPension: 0, monthlyPension: 0,
-        annualInsurance: 0, monthlyInsurance: 0,
-      },
+      lastCalculatedResults: { ...EMPTY_RESULTS }, // ✅ 초기 대시보드 0값
       scenarios: [],
       domRefs: {},
-      _calcTimer: null
     };
 
     const isInputDisabled = (fieldName) => {
@@ -191,37 +192,17 @@
       }
 
       renderApiStatusBadge();
-      // meta가 갱신되었을 수 있으니 한 번 계산 리프레시
-      triggerRealtimeCalc();
+      // ✅ 여기서는 계산/대시보드 갱신하지 않음 (초기 0 유지)
     }
 
     /* ─────────────────────────────────────────────────────────────
-     * 5) Server Calculate (단건) + Debounce
+     * 5) Server Calculate (단건)
      * ───────────────────────────────────────────────────────────── */
 
     async function serverCalc(mode, inputs) {
       const res = await apiPost("/calc", { app: "pro-consulting", mode, inputs });
       if (!res?.ok) throw new Error(res?.error || "calc_failed");
       return res.result;
-    }
-
-    function triggerRealtimeCalc() {
-      // 너무 잦은 호출 방지(입력 중)
-      if (state._calcTimer) clearTimeout(state._calcTimer);
-      state._calcTimer = setTimeout(async () => {
-        try {
-          const result = await serverCalc(state.calculationMode, state.inputs);
-          state.lastCalculatedResults = result;
-          updateInputForm();
-          renderDashboard();
-        } catch (e) {
-          // 서버 오류 시 UI는 유지, 배지만 갱신
-          API_STATUS.state = "error";
-          API_STATUS.message = "계산 실패(서버 응답 확인)";
-          API_STATUS.lastCheckedAt = Date.now();
-          renderApiStatusBadge();
-        }
-      }, 180);
     }
 
     /* ─────────────────────────────────────────────────────────────
@@ -322,7 +303,6 @@
       const modeLabel = SIMULATION_MODES.find(m => m.id === state.calculationMode)?.label || '';
       state.domRefs.dashboardInsightMode.textContent = modeLabel.split('.')[1]?.trim() || modeLabel;
 
-      // 인사이트 문구(서버 산출값 기반)
       const industryAvg = 40;
       const diff = industryAvg - (res.actualProfitRate || 0);
       const diffText = diff > 0 ? '낮습니다' : '높습니다';
@@ -338,18 +318,29 @@
 
       INPUT_FIELDS.forEach(field => {
         const input = document.querySelector(`[name="${field.name}"]`);
+        if (!input) return;
+
         const disabled = isInputDisabled(field.name);
-        const label = input.closest('div.space-y-5 > div').querySelector('label span');
+
+        // ✅ "겉으로만" 비활성이 아니라 진짜 입력 차단
+        input.disabled = disabled;
+        input.setAttribute('aria-disabled', disabled ? 'true' : 'false');
+
+        const label = input.closest('div.space-y-5 > div')?.querySelector('label span');
 
         input.className = `w-full px-4 py-2.5 rounded-lg border transition-colors ${
           disabled
             ? 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed'
             : 'bg-white border-slate-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500'
         }`;
+
         input.placeholder = disabled ? "자동 계산" : "0";
         if (label) label.style.display = disabled ? 'inline' : 'none';
 
         let val = disabled ? results[field.resultName] : inputs[field.name];
+
+        // ✅ 초기 0일 때 자동 산출칸은 빈칸으로 두고 싶으면 아래처럼:
+        // if (disabled && (Number(val) || 0) === 0) val = 0; // (현재는 0이면 빈칸 처리되게 아래 로직으로 둠)
 
         if (document.activeElement !== input || disabled) {
           if (field.name === 'targetProfitRate') {
@@ -501,18 +492,22 @@
     };
 
     /* ─────────────────────────────────────────────────────────────
-     * 8) Events
+     * 8) Events (정책 변경: 계산하기를 눌러야만 결과 갱신)
      * ───────────────────────────────────────────────────────────── */
 
     window.setCalculationMode = (modeId) => {
       state.calculationMode = modeId;
       renderModeSelectors();
-      updateInputForm();
-      triggerRealtimeCalc(); // ✅ 서버 계산
+      updateInputForm();   // ✅ 입력칸 disabled 상태만 갱신
+      renderDashboard();   // ✅ 현재 lastCalculatedResults(초기 0 또는 마지막 계산값)만 보여줌
+      // ❌ 모드 변경 시 서버 계산하지 않음
     };
 
     const handleInput = (e) => {
       const { name, value, type } = e.target;
+
+      // ✅ 자동 산출칸은 입력 무시(방어)
+      if (isInputDisabled(name)) return;
 
       let rawValue;
       if (type === 'text' && ['annualRevenue','monthlyExpense','monthlyRequiredExpense','afterTaxNetIncome'].includes(name)) {
@@ -526,13 +521,15 @@
         if (e.target.type === 'text') {
           e.target.value = rawValue ? rawValue.toLocaleString() : '';
         }
-        triggerRealtimeCalc(); // ✅ 입력 시 서버 계산(디바운스)
+        // ❌ 입력 시 서버 계산/대시보드 갱신하지 않음
       }
     };
 
     const handleAddScenario = async () => {
       try {
         const result = await serverCalc(state.calculationMode, state.inputs);
+
+        // ✅ 계산하기를 눌렀을 때만 대시보드 갱신
         state.lastCalculatedResults = result;
 
         const newId = state.scenarios.length > 0 ? Math.max(...state.scenarios.map(s => s.id)) + 1 : 1;
@@ -544,6 +541,10 @@
         renderScenarioTable();
       } catch (e) {
         alert("계산 실패: 서버 응답을 확인하세요.");
+        API_STATUS.state = "error";
+        API_STATUS.message = "계산 실패(서버 응답 확인)";
+        API_STATUS.lastCheckedAt = Date.now();
+        renderApiStatusBadge();
       }
     };
 
@@ -554,8 +555,12 @@
 
     const handleResetInputs = () => {
       state.inputs = { ...EMPTY_INPUTS };
+
+      // ✅ 리셋 시 대시보드는 다시 0값으로(‘계산하기’ 누르기 전 상태)
+      state.lastCalculatedResults = { ...EMPTY_RESULTS };
+
       updateInputForm();
-      triggerRealtimeCalc();
+      renderDashboard();
     };
 
     const handleClearScenarios = () => {
@@ -599,6 +604,7 @@
         if (removeBtn) handleRemoveScenario(Number(removeBtn.getAttribute('data-id')));
       });
 
+      // ✅ 초기 렌더(대시보드 0값)
       renderModeSelectors();
       updateInputForm();
       renderDashboard();
