@@ -5,445 +5,131 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Pro-Consulting Lab (HTML/JS)</title>
 
-  <!-- Tailwind CSS CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
-
-  <!-- SheetJS (Excel Export) -->
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 
   <style>
-    .sticky-col-1 { left: 0; z-index: 20; box-shadow: 2px 0 5px -2px rgba(0,0,0,0.1); }
-    .sticky-col-2 { left: 40px; z-index: 20; box-shadow: 2px 0 5px -2px rgba(0,0,0,0.1); }
-    .table-container { overflow-x: auto; }
-    .sticky-col { position: sticky; }
+    .sticky-col-1 { left:0; z-index:20; box-shadow:2px 0 5px -2px rgba(0,0,0,0.1); }
+    .sticky-col-2 { left:40px; z-index:20; box-shadow:2px 0 5px -2px rgba(0,0,0,0.1); }
+    .table-container { overflow-x:auto; }
+    .sticky-col { position:sticky; }
   </style>
 
   <script>
-    // =========================================================
-    // 0) API (Lambda) 설정
-    // =========================================================
-    const API = {
-      base: "https://dgrfavjoudnkjfbibm3k3sinfy0wzdmw.lambda-url.us-east-1.on.aws",
-      endpoints: {
-        meta: "/meta",
-        health: "/health"
-      }
-    };
+    /* ─────────────────────────────────────────────────────────────
+     * 0) API
+     * ───────────────────────────────────────────────────────────── */
 
-    // =========================================================
-    // 1) 동적 설정(전부 API에서 주입) - ✅ 하드코딩 제거
-    // =========================================================
-    const DYN = {
-      ready: false,
-      error: null,
-      year: null,
+    // ✅ 여기만 너의 새 Lambda URL로 교체
+    const API_BASE = "https://es7hjf62t7glulxy4y2ybfck2a0hqdde.lambda-url.us-east-1.on.aws";
 
-      // 누진세율표(Quick Deduction) : [{upto, rate, quickDeduction}, ...]
-      progressiveTax: null,
-
-      // 보험 요율
-      np: { employeeRate: null, min: null, max: null },
-      hi: { employeeRate: null, ltcRateOnHI: null, min: null, max: null },
-
-      // raw meta 보관(디버깅/표시용)
+    const API_STATUS = {
+      state: "idle", // idle | checking | ok | error
+      message: "연결 확인 전",
       meta: null,
       health: null,
-      lastFetchedAt: null
+      lastCheckedAt: null
     };
 
-    // =========================================================
-    // 2) UI/로직 상수
-    // =========================================================
+    async function apiGet(path) {
+      const res = await fetch(`${API_BASE}${path}`, { method: "GET" });
+      if (!res.ok) throw new Error(`GET ${path} ${res.status}`);
+      return res.json();
+    }
+
+    async function apiPost(path, bodyObj) {
+      const res = await fetch(`${API_BASE}${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(bodyObj),
+      });
+      if (!res.ok) throw new Error(`POST ${path} ${res.status}`);
+      return res.json();
+    }
+
+    /* ─────────────────────────────────────────────────────────────
+     * 1) Config / UI Static
+     * ───────────────────────────────────────────────────────────── */
+
     const EMPTY_INPUTS = {
       annualRevenue: 0, monthlyExpense: 0, monthlyRequiredExpense: 0,
       targetProfitRate: 0, afterTaxNetIncome: 0,
     };
 
     const INPUT_FIELDS = [
-      { name: 'annualRevenue', resultName: 'annualRev' },
-      { name: 'monthlyExpense', resultName: 'monthlyExp' },
-      { name: 'monthlyRequiredExpense', resultName: 'monthlyReqExp' },
-      { name: 'targetProfitRate', resultName: 'targetProfitRate' },
-      { name: 'afterTaxNetIncome', resultName: 'monthlyNetIncome' }
+      { name: 'annualRevenue', isCurrency: true, resultName: 'annualRev' },
+      { name: 'monthlyExpense', isCurrency: true, resultName: 'monthlyExp' },
+      { name: 'monthlyRequiredExpense', isCurrency: true, resultName: 'monthlyReqExp' },
+      { name: 'targetProfitRate', isCurrency: false, resultName: 'targetProfitRate' },
+      { name: 'afterTaxNetIncome', isCurrency: true, resultName: 'monthlyNetIncome' }
     ];
 
     const DASHBOARD_CONFIG = {
       'mode1': [
-        { title: "예상 매출", keyAnn: 'annualRev', keyMon: 'monthlyRev', icon: 'TrendingUp', color: 'bg-emerald-500' },
-        { title: "예상 세후순이익", keyAnn: 'annualNetIncome', keyMon: 'monthlyNetIncome', icon: 'DollarSign', color: 'bg-blue-500' }
+        { title:"예상 매출", keyAnn:'annualRev', keyMon:'monthlyRev', icon:'TrendingUp', color:'bg-emerald-500' },
+        { title:"예상 세후순이익", keyAnn:'annualNetIncome', keyMon:'monthlyNetIncome', icon:'DollarSign', color:'bg-blue-500' }
       ],
       'mode2': [
-        { title: "예상 매출", keyAnn: 'annualRev', keyMon: 'monthlyRev', icon: 'TrendingUp', color: 'bg-emerald-500' },
-        { title: "목표소득률", keyVal: 'targetProfitRate', isPercent: true, icon: 'Target', color: 'bg-purple-500' }
+        { title:"예상 매출", keyAnn:'annualRev', keyMon:'monthlyRev', icon:'TrendingUp', color:'bg-emerald-500' },
+        { title:"목표소득률", keyVal:'targetProfitRate', isPercent:true, icon:'Target', color:'bg-purple-500' }
       ],
       'mode3': [
-        { title: "예상 매출", keyAnn: 'annualRev', keyMon: 'monthlyRev', icon: 'TrendingUp', color: 'bg-emerald-500' },
-        { title: "필요경비", keyAnn: 'annualReqExp', keyMon: 'monthlyReqExp', icon: 'Calculator', color: 'bg-orange-500' }
+        { title:"예상 매출", keyAnn:'annualRev', keyMon:'monthlyRev', icon:'TrendingUp', color:'bg-emerald-500' },
+        { title:"필요경비", keyAnn:'annualReqExp', keyMon:'monthlyReqExp', icon:'Calculator', color:'bg-orange-500' }
       ],
       'mode4': [
-        { title: "필요경비", keyAnn: 'annualReqExp', keyMon: 'monthlyReqExp', icon: 'Calculator', color: 'bg-orange-500' },
-        { title: "예상 세후순이익", keyAnn: 'annualNetIncome', keyMon: 'monthlyNetIncome', icon: 'DollarSign', color: 'bg-blue-500' }
+        { title:"필요경비", keyAnn:'annualReqExp', keyMon:'monthlyReqExp', icon:'Calculator', color:'bg-orange-500' },
+        { title:"예상 세후순이익", keyAnn:'annualNetIncome', keyMon:'monthlyNetIncome', icon:'DollarSign', color:'bg-blue-500' }
       ],
       'mode5': [
-        { title: "필요경비", keyAnn: 'annualReqExp', keyMon: 'monthlyReqExp', icon: 'Calculator', color: 'bg-orange-500' },
-        { title: "목표소득률", keyVal: 'targetProfitRate', isPercent: true, icon: 'Target', color: 'bg-purple-500' }
+        { title:"필요경비", keyAnn:'annualReqExp', keyMon:'monthlyReqExp', icon:'Calculator', color:'bg-orange-500' },
+        { title:"목표소득률", keyVal:'targetProfitRate', isPercent:true, icon:'Target', color:'bg-purple-500' }
       ]
     };
 
     const SIMULATION_MODES = [
-      { id: 'mode1', label: '1. 연매출 & 세후순이익 산출', desc: '월지출/월필요경비/목표소득률을 기반으로 연매출/순이익을 역산합니다.', icon: '📈' },
-      { id: 'mode2', label: '2. 연매출 & 목표소득률 산출', desc: '필요경비/지출/세후순이익 기반으로 목표소득률/매출을 역산합니다.', icon: '📊' },
-      { id: 'mode3', label: '3. 연매출 & 필요경비 산출', desc: '지출/목표소득률/세후순이익 기반으로 필요경비/매출을 역산합니다.', icon: '🧮' },
-      { id: 'mode4', label: '4. 필요경비 & 세후순이익 산출', desc: '연매출/지출/목표소득률 기반으로 필요경비/세후순이익을 산출합니다.', icon: '💰' },
-      { id: 'mode5', label: '5. 필요경비 & 목표소득률 산출', desc: '연매출/지출/세후순이익 기반으로 필요경비/목표소득률을 역산합니다.', icon: '🎯' }
+      { id:'mode1', label:'1. 연매출 & 세후순이익 산출', desc:'월지출/월필요경비/목표소득률을 기반으로 연매출/순이익을 역산합니다.', icon:'📈' },
+      { id:'mode2', label:'2. 연매출 & 목표소득률 산출', desc:'필요경비/지출/세후순이익 기반으로 목표소득률/매출을 역산합니다.', icon:'📊' },
+      { id:'mode3', label:'3. 연매출 & 필요경비 산출', desc:'지출/목표소득률/세후순이익 기반으로 필요경비/매출을 역산합니다.', icon:'🧮' },
+      { id:'mode4', label:'4. 필요경비 & 세후순이익 산출', desc:'연매출/지출/목표소득률 기반으로 필요경비/세후순이익을 산출합니다.', icon:'💰' },
+      { id:'mode5', label:'5. 필요경비 & 목표소득률 산출', desc:'연매출/지출/세후순이익 기반으로 필요경비/목표소득률을 역산합니다.', icon:'🎯' }
     ];
 
     const ICON_MAP = {
-      'TrendingUp': '📈', 'PieChart': '📊', 'Calculator': '🧮',
-      'DollarSign': '💰', 'Target': '🎯', 'FileText': '📄',
+      'TrendingUp':'📈','PieChart':'📊','Calculator':'🧮','DollarSign':'💰','Target':'🎯',
+      'Activity':'💡','FileText':'📄','RotateCcw':'🔄','Plus':'➕','Trash2':'🗑️','Save':'💾','ArrowRightCircle':'➡️'
     };
 
-    // =========================================================
-    // 3) 유틸
-    // =========================================================
-    const formatCurrency = (val) => new Intl.NumberFormat('ko-KR', { style: 'currency', currency: 'KRW' }).format(val);
-    const formatCompactCurrency = (val) => (!val ? '0' : new Intl.NumberFormat('ko-KR', { style: 'decimal', maximumFractionDigits: 0 }).format(val));
-    const validate = (val) => Number.isFinite(val) ? val : 0;
+    /* ─────────────────────────────────────────────────────────────
+     * 2) Formatting Utils
+     * ───────────────────────────────────────────────────────────── */
+
+    const formatCurrency = (val) => new Intl.NumberFormat('ko-KR',{ style:'currency', currency:'KRW' }).format(val || 0);
+    const formatCompactCurrency = (val) => new Intl.NumberFormat('ko-KR',{ style:'decimal', maximumFractionDigits:0 }).format(Math.round(val || 0));
     const formatRate = (rate) => (Number.isFinite(Number(rate)) ? Number(rate) : 0).toFixed(1);
-    const toPercent = (num) => (Number.isFinite(num) ? num.toFixed(1) : '0.0');
-    const trunc10 = (v) => Math.floor((Number(v) || 0) / 10) * 10;
+    const toPercent = (num) => (Number.isFinite(Number(num)) ? Number(num) : 0).toFixed(1);
 
-    function parseBound(v) {
-      if (v === null || v === undefined || v === '') return null;
-      const n = Number(v);
-      return Number.isFinite(n) ? n : null;
-    }
+    /* ─────────────────────────────────────────────────────────────
+     * 3) State
+     * ───────────────────────────────────────────────────────────── */
 
-    function ensureFiniteOrNull(v) {
-      const n = Number(v);
-      return Number.isFinite(n) ? n : null;
-    }
-
-    // =========================================================
-    // 4) API -> 동적설정 주입 (핵심: 여기만 키 매핑 수정하면 됨)
-    // =========================================================
-    function pickProgressiveTax(meta) {
-      // meta 구조가 다를 수 있으니 후보 키를 여러 개 지원
-      const candidates = [
-        meta?.progressiveTax,
-        meta?.tax?.progressiveTax,
-        meta?.tax?.progressive,
-        meta?.progressiveTaxTable,
-        meta?.incomeTax?.progressiveTax
-      ];
-      const arr = candidates.find(v => Array.isArray(v) && v.length);
-      return arr || null;
-    }
-
-    function normalizeMeta(meta) {
-      const ranges = meta?.ranges || meta?.insuranceRanges || {};
-
-      const npMin = parseBound(ranges?.np?.min);
-      const npMax = parseBound(ranges?.np?.max);
-      const hiMin = parseBound(ranges?.hi?.min);
-      const hiMax = parseBound(ranges?.hi?.max);
-
-      const npEmployeeRate = ensureFiniteOrNull(meta?.np?.employeeRate);
-      const hiEmployeeRate = ensureFiniteOrNull(meta?.hi?.employeeRate);
-      const ltcRateOnHI    = ensureFiniteOrNull(meta?.hi?.ltcRateOnHI);
-
-      const progressiveTax = pickProgressiveTax(meta);
-
-      return {
-        year: ensureFiniteOrNull(meta?.year),
-        progressiveTax,
-        np: { employeeRate: npEmployeeRate, min: npMin, max: npMax },
-        hi: { employeeRate: hiEmployeeRate, ltcRateOnHI, min: hiMin, max: hiMax }
-      };
-    }
-
-    function validateDynReady() {
-      // 세율/요율/표가 하나라도 없으면 "정확한 계산" 불가 → 계산 버튼 막기
-      if (!DYN.year) return "meta.year 누락";
-      if (!Array.isArray(DYN.progressiveTax) || !DYN.progressiveTax.length) return "meta.progressiveTax(누진세율표) 누락";
-      if (!Number.isFinite(DYN.np.employeeRate)) return "meta.np.employeeRate 누락";
-      if (!Number.isFinite(DYN.hi.employeeRate)) return "meta.hi.employeeRate 누락";
-      if (!Number.isFinite(DYN.hi.ltcRateOnHI)) return "meta.hi.ltcRateOnHI 누락";
-      return null;
-    }
-
-    async function fetchMetaAndHealth() {
-      DYN.ready = false;
-      DYN.error = null;
-      DYN.lastFetchedAt = Date.now();
-      renderApiStatusBadge();
-
-      try {
-        const [healthRes, metaRes] = await Promise.all([
-          fetch(API.base + API.endpoints.health, { method: "GET" }),
-          fetch(API.base + API.endpoints.meta, { method: "GET" })
-        ]);
-
-        if (!healthRes.ok || !metaRes.ok) {
-          throw new Error(`http_error (health=${healthRes.status}, meta=${metaRes.status})`);
-        }
-
-        const health = await healthRes.json();
-        const meta = await metaRes.json();
-
-        DYN.health = health;
-        DYN.meta = meta;
-
-        const norm = normalizeMeta(meta);
-        DYN.year = norm.year;
-        DYN.progressiveTax = norm.progressiveTax;
-
-        DYN.np.employeeRate = norm.np.employeeRate;
-        DYN.np.min = norm.np.min;
-        DYN.np.max = norm.np.max;
-
-        DYN.hi.employeeRate = norm.hi.employeeRate;
-        DYN.hi.ltcRateOnHI = norm.hi.ltcRateOnHI;
-        DYN.hi.min = norm.hi.min;
-        DYN.hi.max = norm.hi.max;
-
-        const err = validateDynReady();
-        if (err) {
-          DYN.error = err;
-          DYN.ready = false;
-        } else {
-          DYN.ready = true;
-        }
-
-      } catch (e) {
-        DYN.error = "Lambda 연결 실패(도메인/CORS/경로 확인)";
-        DYN.ready = false;
-      }
-
-      renderApiStatusBadge();
-      refreshAll();
-    }
-
-    // =========================================================
-    // 5) 세금/보험 계산 (로직 유지, 데이터만 DYN에서 주입)
-    // =========================================================
-    function calculateProgressiveIncomeTax(tb) {
-      // DYN.ready가 false면 이 함수가 호출되면 안됨(계산 버튼 막음)
-      const base = Math.max(0, Math.floor(Number(tb) || 0));
-      for (const s of DYN.progressiveTax) {
-        const upto = (s.upto === null || s.upto === undefined) ? null : Number(s.upto);
-        if (upto === null || base <= upto) {
-          const tax = Math.floor(base * Number(s.rate) - Number(s.quickDeduction));
-          return Math.max(0, tax);
-        }
-      }
-      return 0;
-    }
-
-    const solveBinarySearch = (func, targetValue) => {
-      let low = 0;
-      let high = 100_000_000_000; // 1000억
-      let mid = 0;
-      for (let i = 0; i < 100; i++) {
-        mid = (low + high) / 2;
-        const result = func(mid);
-        if (Math.abs(result - targetValue) < 10) break;
-        if (result < targetValue) low = mid;
-        else high = mid;
-      }
-      return mid;
-    };
-
-    function calcInsuranceByRules(annualIncomeAmount) {
-      const monthlyBaseRaw = Math.max(0, Number(annualIncomeAmount || 0) / 12);
-
-      // 국민연금: 1,000원 절사
-      let npBase = Math.floor(monthlyBaseRaw / 1000) * 1000;
-      if (Number.isFinite(DYN.np.min)) npBase = Math.max(npBase, DYN.np.min);
-      if (Number.isFinite(DYN.np.max)) npBase = Math.min(npBase, DYN.np.max);
-
-      // 건강보험: raw
-      let hiBase = monthlyBaseRaw;
-      if (Number.isFinite(DYN.hi.min)) hiBase = Math.max(hiBase, DYN.hi.min);
-      if (Number.isFinite(DYN.hi.max)) hiBase = Math.min(hiBase, DYN.hi.max);
-
-      // 사업주: 2배
-      const npRateTotal = (Number(DYN.np.employeeRate) || 0) * 2;
-      const hiRateTotal = (Number(DYN.hi.employeeRate) || 0) * 2;
-
-      const monthlyNP  = trunc10(npBase * npRateTotal);
-      const monthlyHI  = trunc10(hiBase * hiRateTotal);
-      const monthlyLTC = trunc10(monthlyHI * (Number(DYN.hi.ltcRateOnHI) || 0));
-
-      return {
-        monthlyBaseRaw,
-        npBase, hiBase,
-        monthlyNP, annualNP: monthlyNP * 12,
-        monthlyHI, monthlyLTC,
-        annualInsuranceTotal: (monthlyHI + monthlyLTC) * 12,
-        monthlyInsuranceTotal: (monthlyHI + monthlyLTC),
-      };
-    }
-
-    const calculateResults = (inputs, mode) => {
-      // ✅ 정확도 보장을 위해: DYN 미준비면 계산 자체를 하지 않음
-      if (!DYN.ready) {
-        return {
-          annualRev: 0, monthlyRev: 0,
-          annualExp: (inputs.monthlyExpense||0)*12, monthlyExp: (inputs.monthlyExpense||0),
-          annualReqExp: (inputs.monthlyRequiredExpense||0)*12, monthlyReqExp: (inputs.monthlyRequiredExpense||0),
-          annualIncomeAmountActual: 0, annualIncomeAmountTarget: 0,
-          actualProfitRate: 0, targetProfitRate: (inputs.targetProfitRate||0),
-          annualNetIncome: 0, monthlyNetIncome: 0,
-          annualTax: 0, monthlyTax: 0, annualTaxRate: 0,
-          annualPension: 0, monthlyPension: 0,
-          annualInsurance: 0, monthlyInsurance: 0,
-        };
-      }
-
-      const { annualRevenue, monthlyExpense, monthlyRequiredExpense, targetProfitRate, afterTaxNetIncome } = inputs;
-
-      const annualExp = monthlyExpense * 12;
-      const annualReqExpInput = monthlyRequiredExpense * 12;
-      const annualAfterTaxNetIncome = afterTaxNetIncome * 12;
-
-      let calcAR = annualRevenue;
-      let calcMRE = monthlyRequiredExpense;
-      let calcTPR = targetProfitRate;
-
-      let actualNetIncome = 0; // ANI
-      let taxBaseIncome = 0;   // TNI (과세표준 가정)
-
-      switch (mode) {
-        case 'mode1': {
-          const totalExpense = annualExp + annualReqExpInput;
-          const complement = 1 - targetProfitRate / 100;
-          calcAR = (complement > 0 && targetProfitRate < 100) ? totalExpense / complement : 0;
-
-          actualNetIncome = calcAR - annualExp;
-          taxBaseIncome = actualNetIncome - annualReqExpInput;
-          calcMRE = monthlyRequiredExpense;
-          calcTPR = targetProfitRate;
-          break;
-        }
-        case 'mode2': {
-          const func = (tni) => {
-            const incomeTax = calculateProgressiveIncomeTax(tni);
-            const totalTax = incomeTax * 1.1;
-            const ani = tni + annualReqExpInput;
-            return ani - totalTax;
-          };
-          taxBaseIncome = solveBinarySearch(func, annualAfterTaxNetIncome);
-
-          calcAR = taxBaseIncome + annualReqExpInput + annualExp;
-          actualNetIncome = calcAR - annualExp;
-          calcTPR = (calcAR !== 0) ? (taxBaseIncome / calcAR) * 100 : 0;
-          calcMRE = monthlyRequiredExpense;
-          break;
-        }
-        case 'mode3': {
-          const tprRatio = targetProfitRate / 100;
-          if (tprRatio > 0) {
-            const func = (tni) => {
-              const incomeTax = calculateProgressiveIncomeTax(tni);
-              const totalTax = incomeTax * 1.1;
-              const ar = tni / tprRatio;
-              const ani = ar - annualExp;
-              return ani - totalTax;
-            };
-            taxBaseIncome = solveBinarySearch(func, annualAfterTaxNetIncome);
-            calcAR = taxBaseIncome / tprRatio;
-            actualNetIncome = calcAR - annualExp;
-            calcMRE = (actualNetIncome - taxBaseIncome) / 12;
-          } else {
-            calcAR = 0; calcMRE = 0; taxBaseIncome = 0; actualNetIncome = 0;
-          }
-          calcTPR = targetProfitRate;
-          break;
-        }
-        case 'mode4': {
-          actualNetIncome = annualRevenue - annualExp;
-          taxBaseIncome = annualRevenue * (targetProfitRate / 100);
-          calcMRE = (actualNetIncome - taxBaseIncome) / 12;
-          calcAR = annualRevenue;
-          calcTPR = targetProfitRate;
-          break;
-        }
-        case 'mode5': {
-          actualNetIncome = annualRevenue - annualExp;
-          const targetTaxBurden = actualNetIncome - annualAfterTaxNetIncome;
-
-          if (targetTaxBurden > 0) {
-            const func = (tni) => calculateProgressiveIncomeTax(tni) * 1.1;
-            taxBaseIncome = solveBinarySearch(func, targetTaxBurden);
-          } else {
-            taxBaseIncome = actualNetIncome;
-          }
-          calcMRE = (actualNetIncome - taxBaseIncome) / 12;
-          calcTPR = (annualRevenue !== 0) ? (taxBaseIncome / annualRevenue) * 100 : 0;
-          calcAR = annualRevenue;
-          break;
-        }
-      }
-
-      const finalAR  = validate(calcAR);
-      const finalMRE = validate(calcMRE);
-      const finalTPR = validate(calcTPR);
-      const finalANI = validate(actualNetIncome);
-      const finalTNI = validate(taxBaseIncome);
-
-      const incomeTax = calculateProgressiveIncomeTax(finalTNI);
-      const totalTax  = incomeTax * 1.1;
-
-      const ins = calcInsuranceByRules(finalTNI);
-
-      const finalATNI = validate(finalANI - totalTax);
-      const actualPR = (finalAR !== 0) ? (finalANI / finalAR) * 100 : 0;
-      const annualTaxRate = (finalAR !== 0) ? (totalTax / finalAR) * 100 : 0;
-
-      const annualIncomeAmountActual = validate(finalAR * (validate(actualPR) / 100));
-      const annualIncomeAmountTarget = validate(finalAR * (finalTPR / 100));
-
-      return {
-        annualRev: finalAR,
-        monthlyRev: finalAR / 12,
-
-        annualExp: annualExp,
-        monthlyExp: monthlyExpense,
-
-        annualReqExp: finalMRE * 12,
-        monthlyReqExp: finalMRE,
-
-        annualIncomeAmountActual,
-        annualIncomeAmountTarget,
-
-        actualProfitRate: validate(actualPR),
-        targetProfitRate: finalTPR,
-
-        annualNetIncome: finalATNI,
-        monthlyNetIncome: finalATNI / 12,
-
-        annualTax: totalTax,
-        monthlyTax: totalTax / 12,
-        annualTaxRate: validate(annualTaxRate),
-
-        annualPension: validate(ins.annualNP),
-        monthlyPension: validate(ins.monthlyNP),
-
-        annualInsurance: validate(ins.annualInsuranceTotal),
-        monthlyInsurance: validate(ins.monthlyInsuranceTotal),
-      };
-    };
-
-    // =========================================================
-    // 6) 상태
-    // =========================================================
     let state = {
       calculationMode: 'mode1',
       inputs: { ...EMPTY_INPUTS },
-      lastCalculatedResults: calculateResults(EMPTY_INPUTS, 'mode1'),
+      lastCalculatedResults: {
+        annualRev: 0, monthlyRev: 0,
+        annualExp: 0, monthlyExp: 0,
+        annualReqExp: 0, monthlyReqExp: 0,
+        annualIncomeAmountActual: 0, annualIncomeAmountTarget: 0,
+        actualProfitRate: 0, targetProfitRate: 0,
+        annualNetIncome: 0, monthlyNetIncome: 0,
+        annualTax: 0, monthlyTax: 0, annualTaxRate: 0,
+        annualPension: 0, monthlyPension: 0,
+        annualInsurance: 0, monthlyInsurance: 0,
+      },
       scenarios: [],
-      domRefs: {}
+      domRefs: {},
+      _calcTimer: null
     };
 
     const isInputDisabled = (fieldName) => {
@@ -456,13 +142,96 @@
       return false;
     };
 
-    // =========================================================
-    // 7) UI 렌더
-    // =========================================================
+    /* ─────────────────────────────────────────────────────────────
+     * 4) API Status Badge
+     * ───────────────────────────────────────────────────────────── */
+
+    function renderApiStatusBadge() {
+      const el = state.domRefs.apiStatusBadge;
+      const sub = state.domRefs.apiStatusSub;
+      if (!el || !sub) return;
+
+      const s = API_STATUS.state;
+      const msg = API_STATUS.message;
+
+      const cls =
+        s === "ok" ? "bg-emerald-50 text-emerald-700 border-emerald-200" :
+        s === "checking" ? "bg-amber-50 text-amber-700 border-amber-200" :
+        s === "error" ? "bg-red-50 text-red-700 border-red-200" :
+        "bg-slate-50 text-slate-600 border-slate-200";
+
+      el.className = `text-xs font-semibold px-3 py-1.5 rounded-full border ${cls} flex items-center gap-2`;
+      el.innerHTML = `
+        <span class="inline-block h-2 w-2 rounded-full ${s==="ok"?"bg-emerald-500":s==="checking"?"bg-amber-500":s==="error"?"bg-red-500":"bg-slate-400"}"></span>
+        API ${s === "ok" ? "연결됨" : s === "checking" ? "확인중" : s === "error" ? "오류" : "대기"}
+      `;
+
+      const year = API_STATUS.meta?.year ?? "-";
+      const checked = API_STATUS.lastCheckedAt ? new Date(API_STATUS.lastCheckedAt).toLocaleString() : "-";
+      sub.textContent = `${msg} · year=${year} · ${checked}`;
+    }
+
+    async function checkApiConnection() {
+      API_STATUS.state = "checking";
+      API_STATUS.message = "health/meta 확인중";
+      API_STATUS.lastCheckedAt = Date.now();
+      renderApiStatusBadge();
+
+      try {
+        const [health, meta] = await Promise.all([ apiGet("/health"), apiGet("/meta") ]);
+        API_STATUS.health = health;
+        API_STATUS.meta = meta;
+        API_STATUS.state = "ok";
+        API_STATUS.message = "서버 응답 정상";
+        API_STATUS.lastCheckedAt = Date.now();
+      } catch (e) {
+        API_STATUS.state = "error";
+        API_STATUS.message = "서버 연결 실패(URL/CORS/경로 확인)";
+        API_STATUS.lastCheckedAt = Date.now();
+      }
+
+      renderApiStatusBadge();
+      // meta가 갱신되었을 수 있으니 한 번 계산 리프레시
+      triggerRealtimeCalc();
+    }
+
+    /* ─────────────────────────────────────────────────────────────
+     * 5) Server Calculate (단건) + Debounce
+     * ───────────────────────────────────────────────────────────── */
+
+    async function serverCalc(mode, inputs) {
+      const res = await apiPost("/calc", { app: "pro-consulting", mode, inputs });
+      if (!res?.ok) throw new Error(res?.error || "calc_failed");
+      return res.result;
+    }
+
+    function triggerRealtimeCalc() {
+      // 너무 잦은 호출 방지(입력 중)
+      if (state._calcTimer) clearTimeout(state._calcTimer);
+      state._calcTimer = setTimeout(async () => {
+        try {
+          const result = await serverCalc(state.calculationMode, state.inputs);
+          state.lastCalculatedResults = result;
+          updateInputForm();
+          renderDashboard();
+        } catch (e) {
+          // 서버 오류 시 UI는 유지, 배지만 갱신
+          API_STATUS.state = "error";
+          API_STATUS.message = "계산 실패(서버 응답 확인)";
+          API_STATUS.lastCheckedAt = Date.now();
+          renderApiStatusBadge();
+        }
+      }, 180);
+    }
+
+    /* ─────────────────────────────────────────────────────────────
+     * 6) Render
+     * ───────────────────────────────────────────────────────────── */
+
     const createCard = (title, val1, val2, isPercent, iconKey, color) => {
       const icon = ICON_MAP[iconKey] || iconKey;
-      const v1 = isPercent ? (val1?.toFixed(1) || '0.0') + '%' : (typeof val1 === 'number' ? formatCurrency(Math.round(val1)) : val1);
-      const v2 = isPercent ? null : (typeof val2 === 'number' ? formatCurrency(Math.round(val2)) : val2);
+      const v1 = isPercent ? (Number(val1||0).toFixed(1) + '%') : formatCurrency(Math.round(val1||0));
+      const v2 = isPercent ? null : formatCurrency(Math.round(val2||0));
       return `
         <div class="bg-white rounded-xl p-5 shadow-sm border border-slate-200 relative overflow-hidden">
           <div class="absolute top-0 right-0 p-2 rounded-bl-xl opacity-10 ${color}">${icon}</div>
@@ -485,7 +254,7 @@
         </div>`;
     };
 
-    const createFixedResultCard = (title, v1Label, v1, v2Label, v2, iconKey) => {
+    const createFixedResultCard = (title, value1Label, value1, value2Label, value2, iconKey, colorText="text-slate-800") => {
       const icon = ICON_MAP[iconKey] || iconKey;
       if (title === '소득률') {
         return `
@@ -497,11 +266,11 @@
             <div class="space-y-3">
               <div class="flex justify-between items-center border-b border-slate-100 pb-2">
                 <span class="text-xs text-slate-400">실제소득률</span>
-                <span class="text-lg font-bold text-slate-800">${v1}</span>
+                <span class="text-lg font-bold text-slate-800">${value1}</span>
               </div>
               <div class="flex justify-between items-center">
                 <span class="text-xs text-slate-400">목표소득률</span>
-                <span class="text-lg font-bold text-slate-800">${v2}</span>
+                <span class="text-lg font-bold text-slate-800">${value2}</span>
               </div>
             </div>
           </div>`;
@@ -514,69 +283,18 @@
           </h4>
           <div class="space-y-3">
             <div class="flex justify-between items-center border-b border-slate-100 pb-2">
-              <span class="text-xs text-slate-400">${v1Label}</span>
-              <span class="text-lg font-bold text-slate-800">${v1}</span>
+              <span class="text-xs text-slate-400">${value1Label}</span>
+              <span class="text-lg font-bold ${colorText}">${value1}</span>
             </div>
-            ${v2Label ? `
+            ${value2Label ? `
               <div class="flex justify-between items-center">
-                <span class="text-xs text-slate-400">${v2Label}</span>
-                <span class="text-lg font-bold text-slate-800">${v2}</span>
+                <span class="text-xs text-slate-400">${value2Label}</span>
+                <span class="text-lg font-bold ${colorText}">${value2}</span>
               </div>
             ` : ''}
           </div>
         </div>`;
     };
-
-    function renderApiStatusBadge() {
-      const el = state.domRefs.apiStatusBadge;
-      const sub = state.domRefs.apiStatusSub;
-      const btnCalc = state.domRefs.addScenarioBtn;
-
-      if (!el || !sub) return;
-
-      const checking = !DYN.ready && !DYN.error && DYN.lastFetchedAt;
-      const ok = DYN.ready;
-      const error = !!DYN.error;
-
-      const cls =
-        ok ? "bg-emerald-50 text-emerald-700 border-emerald-200" :
-        checking ? "bg-amber-50 text-amber-700 border-amber-200" :
-        error ? "bg-red-50 text-red-700 border-red-200" :
-        "bg-slate-50 text-slate-600 border-slate-200";
-
-      el.className = `text-xs font-semibold px-3 py-1.5 rounded-full border ${cls} flex items-center gap-2`;
-      el.innerHTML = `
-        <span class="inline-block h-2 w-2 rounded-full ${ok?"bg-emerald-500":checking?"bg-amber-500":error?"bg-red-500":"bg-slate-400"}"></span>
-        API ${ok ? "연결됨" : checking ? "확인중" : error ? "오류" : "대기"}
-      `;
-
-      const checked = DYN.lastFetchedAt ? new Date(DYN.lastFetchedAt).toLocaleString() : "-";
-      const yearTxt = DYN.year ? `year=${DYN.year}` : "year=?";
-      const detail = ok ? "meta 로드 완료" : (DYN.error ? DYN.error : "meta 로딩중");
-      sub.textContent = `${detail} · ${yearTxt} · ${checked}`;
-
-      // ✅ meta 없으면 계산 버튼 비활성화(오류/왜곡 방지)
-      if (btnCalc) {
-        btnCalc.disabled = !DYN.ready;
-        btnCalc.className = btnCalc.className.replace(/\sopacity-\S+/g,'').replace(/\spointer-events-\S+/g,'');
-        if (!DYN.ready) btnCalc.className += " opacity-50 pointer-events-none";
-      }
-
-      // 도움문구(요율/세율 기준)도 API 기반으로 표기 바꾸기
-      const guide = document.getElementById("rate-guide-text");
-      if (guide) {
-        if (DYN.ready) {
-          guide.innerHTML = `
-            <li>국민연금/건강보험료: <span class="font-semibold">사업주(2배) + meta 상하한 + 10원 절사 규칙</span> 반영</li>
-            <li>종합소득세·지방세: <span class="font-semibold">소득세 산출 × 1.1</span></li>
-          `;
-        } else {
-          guide.innerHTML = `
-            <li class="text-red-600">현재 meta 미로딩 상태입니다. (세율/요율/상하한/누진표가 없으면 정확한 계산이 불가능)</li>
-          `;
-        }
-      }
-    }
 
     const renderDashboard = () => {
       const res = state.lastCalculatedResults;
@@ -604,8 +322,9 @@
       const modeLabel = SIMULATION_MODES.find(m => m.id === state.calculationMode)?.label || '';
       state.domRefs.dashboardInsightMode.textContent = modeLabel.split('.')[1]?.trim() || modeLabel;
 
+      // 인사이트 문구(서버 산출값 기반)
       const industryAvg = 40;
-      const diff = industryAvg - res.actualProfitRate;
+      const diff = industryAvg - (res.actualProfitRate || 0);
       const diffText = diff > 0 ? '낮습니다' : '높습니다';
 
       state.domRefs.dashboardInsightText.innerHTML =
@@ -634,10 +353,10 @@
 
         if (document.activeElement !== input || disabled) {
           if (field.name === 'targetProfitRate') {
-            input.value = Number.isFinite(val) ? val.toFixed(2) : '0.00';
+            input.value = Number.isFinite(Number(val)) ? Number(val).toFixed(2) : '0.00';
           } else {
-            const num = Math.round(val);
-            input.value = Number.isFinite(num) ? num.toLocaleString() : '0';
+            const n = Math.round(Number(val) || 0);
+            input.value = n ? n.toLocaleString() : '';
           }
         }
       });
@@ -651,7 +370,7 @@
         const labelClass = isActive ? 'text-blue-700' : 'text-slate-700';
         const indicator = isActive ? '<div class="h-2 w-2 rounded-full bg-blue-600 animate-pulse mt-1"></div>' : '';
         return `
-          <button class="mode-btn relative p-4 rounded-xl border-2 text-left transition-all group ${activeClass}" data-mode="${mode.id}">
+          <button onclick="setCalculationMode('${mode.id}')" class="mode-btn relative p-4 rounded-xl border-2 text-left transition-all group ${activeClass}" data-mode="${mode.id}">
             <div class="flex justify-between items-start mb-2">
               <div class="flex items-center gap-2">
                 <div class="p-1.5 rounded-lg ${iconClass}">${mode.icon}</div>
@@ -681,8 +400,8 @@
               <span class="px-2 py-0.5 rounded-full text-[10px] font-medium bg-slate-100 text-slate-600 truncate block w-24 mx-auto">${item.mode.split('.')[0]} 시나리오</span>
             </td>
 
-            <td class="px-4 py-3 text-center text-blue-700 font-bold bg-blue-50/30 border-r border-slate-100">${item.actualProfitRate.toFixed(1)}%</td>
-            <td class="px-4 py-3 text-center text-blue-600 bg-blue-50/30 border-r border-slate-100">${item.targetProfitRate.toFixed(1)}%</td>
+            <td class="px-4 py-3 text-center text-blue-700 font-bold bg-blue-50/30 border-r border-slate-100">${(item.actualProfitRate||0).toFixed(1)}%</td>
+            <td class="px-4 py-3 text-center text-blue-600 bg-blue-50/30 border-r border-slate-100">${(item.targetProfitRate||0).toFixed(1)}%</td>
 
             <td class="px-2 py-3 text-right text-slate-700 font-medium bg-slate-50/30 border-r border-slate-100">${formatCompactCurrency(item.annualRev)}</td>
             <td class="px-2 py-3 text-right text-slate-700 bg-slate-50/30 border-r border-slate-100">${formatCompactCurrency(item.monthlyRev)}</td>
@@ -716,6 +435,10 @@
           </tr>`;
       }).join('');
     };
+
+    /* ─────────────────────────────────────────────────────────────
+     * 7) Excel Export
+     * ───────────────────────────────────────────────────────────── */
 
     const exportScenariosToExcel = () => {
       if (!window.XLSX || !state.scenarios.length) {
@@ -772,61 +495,56 @@
 
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, 'Scenarios');
-
       const now = new Date();
       const filename = `Pro-Consulting-Scenarios_${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}.xlsx`;
       XLSX.writeFile(wb, filename);
     };
 
-    // =========================================================
-    // 8) 이벤트/초기화
-    // =========================================================
-    function refreshAll() {
-      state.lastCalculatedResults = calculateResults(state.inputs, state.calculationMode);
-      updateInputForm();
-      renderDashboard();
-      renderScenarioTable();
-    }
+    /* ─────────────────────────────────────────────────────────────
+     * 8) Events
+     * ───────────────────────────────────────────────────────────── */
 
-    function setCalculationMode(modeId) {
+    window.setCalculationMode = (modeId) => {
       state.calculationMode = modeId;
-      refreshAll();
       renderModeSelectors();
-    }
+      updateInputForm();
+      triggerRealtimeCalc(); // ✅ 서버 계산
+    };
 
     const handleInput = (e) => {
       const { name, value, type } = e.target;
 
       let rawValue;
       if (type === 'text' && ['annualRevenue','monthlyExpense','monthlyRequiredExpense','afterTaxNetIncome'].includes(name)) {
-        rawValue = Number(value.replace(/,/g, ''));
+        rawValue = Number(String(value).replace(/,/g, ''));
       } else if (type === 'number' || name === 'targetProfitRate') {
         rawValue = Number(value);
-      } else {
-        return;
-      }
+      } else return;
 
-      if (!isNaN(rawValue)) {
+      if (!Number.isNaN(rawValue)) {
         state.inputs[name] = rawValue;
         if (e.target.type === 'text') {
           e.target.value = rawValue ? rawValue.toLocaleString() : '';
         }
+        triggerRealtimeCalc(); // ✅ 입력 시 서버 계산(디바운스)
       }
     };
 
-    const handleAddScenario = () => {
-      if (!DYN.ready) return;
+    const handleAddScenario = async () => {
+      try {
+        const result = await serverCalc(state.calculationMode, state.inputs);
+        state.lastCalculatedResults = result;
 
-      const results = calculateResults(state.inputs, state.calculationMode);
-      state.lastCalculatedResults = results;
+        const newId = state.scenarios.length > 0 ? Math.max(...state.scenarios.map(s => s.id)) + 1 : 1;
+        const newScenario = { id: newId, mode: SIMULATION_MODES.find(m => m.id === state.calculationMode).label, ...result };
+        state.scenarios = [...state.scenarios, newScenario];
 
-      const newId = state.scenarios.length > 0 ? Math.max(...state.scenarios.map(s => s.id)) + 1 : 1;
-      const newScenario = { id: newId, mode: SIMULATION_MODES.find(m => m.id === state.calculationMode).label, ...results };
-      state.scenarios = [...state.scenarios, newScenario];
-
-      updateInputForm();
-      renderDashboard();
-      renderScenarioTable();
+        updateInputForm();
+        renderDashboard();
+        renderScenarioTable();
+      } catch (e) {
+        alert("계산 실패: 서버 응답을 확인하세요.");
+      }
     };
 
     const handleRemoveScenario = (id) => {
@@ -836,7 +554,8 @@
 
     const handleResetInputs = () => {
       state.inputs = { ...EMPTY_INPUTS };
-      refreshAll();
+      updateInputForm();
+      triggerRealtimeCalc();
     };
 
     const handleClearScenarios = () => {
@@ -871,22 +590,20 @@
       state.domRefs.headerResetBtn.addEventListener('click', handleResetInputs);
       state.domRefs.clearScenariosBtn.addEventListener('click', handleClearScenarios);
       state.domRefs.excelBtn.addEventListener('click', exportScenariosToExcel);
-      state.domRefs.apiRetryBtn.addEventListener('click', fetchMetaAndHealth);
+      state.domRefs.apiRetryBtn.addEventListener('click', checkApiConnection);
 
       document.addEventListener('click', (e) => {
         const modeBtn = e.target.closest('.mode-btn');
-        if (modeBtn) setCalculationMode(modeBtn.getAttribute('data-mode'));
+        if (modeBtn) window.setCalculationMode(modeBtn.getAttribute('data-mode'));
         const removeBtn = e.target.closest('.remove-btn');
         if (removeBtn) handleRemoveScenario(Number(removeBtn.getAttribute('data-id')));
       });
 
       renderModeSelectors();
-      renderApiStatusBadge(); // 초기 상태(버튼 잠금)
-      refreshAll();
+      updateInputForm();
+      renderDashboard();
       renderScenarioTable();
-
-      // ✅ 로딩 시 meta/health 로드
-      fetchMetaAndHealth();
+      checkApiConnection();
     };
   </script>
 </head>
@@ -936,7 +653,7 @@
           <div class="space-y-5" id="input-form">
             <div>
               <label class="block text-sm font-medium text-slate-700 mb-1.5 flex justify-between">연매출
-                <span style="display: none;" class="text-xs text-blue-500 font-normal self-center">자동 산출됨</span>
+                <span style="display:none;" class="text-xs text-blue-500 font-normal self-center">자동 산출됨</span>
               </label>
               <input type="text" name="annualRevenue" class="w-full px-4 py-2.5 rounded-lg border transition-colors" />
             </div>
@@ -948,14 +665,14 @@
 
             <div>
               <label class="block text-sm font-medium text-slate-700 mb-1.5 flex justify-between">월필요경비
-                <span style="display: none;" class="text-xs text-blue-500 font-normal self-center">자동 산출됨</span>
+                <span style="display:none;" class="text-xs text-blue-500 font-normal self-center">자동 산출됨</span>
               </label>
               <input type="text" name="monthlyRequiredExpense" class="w-full px-4 py-2.5 rounded-lg border transition-colors" />
             </div>
 
             <div>
               <label class="block text-sm font-medium text-slate-700 mb-1.5 flex justify-between">목표소득률 (%)
-                <span style="display: none;" class="text-xs text-blue-500 font-normal self-center">자동 산출됨</span>
+                <span style="display:none;" class="text-xs text-blue-500 font-normal self-center">자동 산출됨</span>
               </label>
               <div class="relative">
                 <input type="number" name="targetProfitRate" step="0.1" class="w-full px-4 py-2.5 rounded-lg border transition-colors pr-8" />
@@ -965,7 +682,7 @@
 
             <div>
               <label class="block text-sm font-medium text-slate-700 mb-1.5 flex justify-between">세후월순이익
-                <span style="display: none;" class="text-xs text-blue-500 font-normal self-center">자동 산출됨</span>
+                <span style="display:none;" class="text-xs text-blue-500 font-normal self-center">자동 산출됨</span>
               </label>
               <input type="text" name="afterTaxNetIncome" class="w-full px-4 py-2.5 rounded-lg border transition-colors" />
             </div>
@@ -991,7 +708,10 @@
 
           <div class="bg-slate-50 border border-slate-200 rounded-xl p-4 text-sm text-slate-600">
             <div class="font-semibold text-slate-700 mb-1">요율/세율 기준</div>
-            <ul id="rate-guide-text" class="list-disc ml-5 space-y-1 text-[13px]"></ul>
+            <ul class="list-disc ml-5 space-y-1 text-[13px]">
+              <li>국민연금/건강보험료: <span class="font-semibold">서버 계산(근로자요율→10원절사→2배, 상·하한 clamp 포함)</span></li>
+              <li>종합소득세·지방세: <span class="font-semibold">소득세 산출 × 1.1</span></li>
+            </ul>
           </div>
         </div>
       </div>
