@@ -16,160 +16,76 @@
   </style>
 
   <script>
-    /* ─────────────────────────────────────────────────────────────
-     * 0) API
-     * ───────────────────────────────────────────────────────────── */
+    /* ======================================================================
+      Pro-Consulting Lab (Single HTML)
+      정책(요청 반영)
+      - 입력 중에는 서버 계산/대시보드 갱신을 하지 않는다.
+      - "🧮 계산하기" 버튼을 눌렀을 때만:
+        (1) 서버 계산 → (2) 대시보드 갱신 → (3) 시나리오 테이블에 추가
+      - "🔄 초기화"(헤더) / "🔄 입력 초기화"(좌측) 버튼은
+        입력 + 대시보드 + 시나리오까지 전부 초기화한다.
 
-    // ✅ 여기만 너의 새 Lambda URL로 교체
+      최적화(v1)
+      - Intl.NumberFormat / DOM 요소를 캐싱해 불필요한 DOM 탐색/객체생성 감소
+      - 시나리오 테이블은 "추가 시 append", "삭제 시 해당 row만 remove"
+        (전체 innerHTML 재생성 최소화)
+      - 이벤트 바인딩 방식 통일(인라인 onclick 제거)
+    ====================================================================== */
+
+    /* =========================
+      0) API 설정
+    ========================= */
+
     const API_BASE = "https://es7hjf62t7glulxy4y2ybfck2a0hqdde.lambda-url.us-east-1.on.aws";
 
     const API_STATUS = {
-      state: "idle", // idle | checking | ok | error
+      state: "idle",
       message: "연결 확인 전",
       meta: null,
       health: null,
       lastCheckedAt: null
     };
 
-    async function apiGet(path) {
-      const res = await fetch(`${API_BASE}${path}`, { method: "GET" });
-      if (!res.ok) throw new Error(`GET ${path} ${res.status}`);
-      return res.json();
+    async function apiGet(path, { timeoutMs = 7000 } = {}) {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), timeoutMs);
+      try {
+        const res = await fetch(`${API_BASE}${path}`, { method: "GET", signal: ctrl.signal });
+        if (!res.ok) throw new Error(`GET ${path} ${res.status}`);
+        return await res.json();
+      } finally {
+        clearTimeout(t);
+      }
     }
 
-    async function apiPost(path, bodyObj) {
-      const res = await fetch(`${API_BASE}${path}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(bodyObj),
-      });
-      if (!res.ok) throw new Error(`POST ${path} ${res.status}`);
-      return res.json();
+    async function apiPost(path, bodyObj, { timeoutMs = 8000 } = {}) {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), timeoutMs);
+
+      try {
+        const res = await fetch(`${API_BASE}${path}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(bodyObj),
+          signal: ctrl.signal
+        });
+
+        if (!res.ok) {
+          let detail = "";
+          try { detail = await res.text(); } catch (_) {}
+          throw new Error(`POST ${path} ${res.status}${detail ? ` | ${detail.slice(0, 200)}` : ""}`);
+        }
+
+        return await res.json();
+      } finally {
+        clearTimeout(t);
+      }
     }
 
-    /* ─────────────────────────────────────────────────────────────
-     * 1) Config / UI Static
-     * ───────────────────────────────────────────────────────────── */
-
-    const EMPTY_INPUTS = {
-      annualRevenue: 0, monthlyExpense: 0, monthlyRequiredExpense: 0,
-      targetProfitRate: 0, afterTaxNetIncome: 0,
-    };
-
-    const EMPTY_RESULTS = {
-      annualRev: 0, monthlyRev: 0,
-      annualExp: 0, monthlyExp: 0,
-      annualReqExp: 0, monthlyReqExp: 0,
-      annualIncomeAmountActual: 0, annualIncomeAmountTarget: 0,
-      actualProfitRate: 0, targetProfitRate: 0,
-      annualNetIncome: 0, monthlyNetIncome: 0,
-      annualTax: 0, monthlyTax: 0, annualTaxRate: 0,
-      annualPension: 0, monthlyPension: 0,
-      annualInsurance: 0, monthlyInsurance: 0,
-    };
-
-    const INPUT_FIELDS = [
-      { name: 'annualRevenue', isCurrency: true, resultName: 'annualRev' },
-      { name: 'monthlyExpense', isCurrency: true, resultName: 'monthlyExp' },
-      { name: 'monthlyRequiredExpense', isCurrency: true, resultName: 'monthlyReqExp' },
-      { name: 'targetProfitRate', isCurrency: false, resultName: 'targetProfitRate' },
-      { name: 'afterTaxNetIncome', isCurrency: true, resultName: 'monthlyNetIncome' }
-    ];
-
-    const DASHBOARD_CONFIG = {
-      'mode1': [
-        { title:"예상 매출", keyAnn:'annualRev', keyMon:'monthlyRev', icon:'TrendingUp', color:'bg-emerald-500' },
-        { title:"예상 세후순이익", keyAnn:'annualNetIncome', keyMon:'monthlyNetIncome', icon:'DollarSign', color:'bg-blue-500' }
-      ],
-      'mode2': [
-        { title:"예상 매출", keyAnn:'annualRev', keyMon:'monthlyRev', icon:'TrendingUp', color:'bg-emerald-500' },
-        { title:"목표소득률", keyVal:'targetProfitRate', isPercent:true, icon:'Target', color:'bg-purple-500' }
-      ],
-      'mode3': [
-        { title:"예상 매출", keyAnn:'annualRev', keyMon:'monthlyRev', icon:'TrendingUp', color:'bg-emerald-500' },
-        { title:"필요경비", keyAnn:'annualReqExp', keyMon:'monthlyReqExp', icon:'Calculator', color:'bg-orange-500' }
-      ],
-      'mode4': [
-        { title:"필요경비", keyAnn:'annualReqExp', keyMon:'monthlyReqExp', icon:'Calculator', color:'bg-orange-500' },
-        { title:"예상 세후순이익", keyAnn:'annualNetIncome', keyMon:'monthlyNetIncome', icon:'DollarSign', color:'bg-blue-500' }
-      ],
-      'mode5': [
-        { title:"필요경비", keyAnn:'annualReqExp', keyMon:'monthlyReqExp', icon:'Calculator', color:'bg-orange-500' },
-        { title:"목표소득률", keyVal:'targetProfitRate', isPercent:true, icon:'Target', color:'bg-purple-500' }
-      ]
-    };
-
-    const SIMULATION_MODES = [
-      { id:'mode1', label:'1. 연매출 & 세후순이익 산출', desc:'월지출/월필요경비/목표소득률을 기반으로 연매출/순이익을 역산합니다.', icon:'📈' },
-      { id:'mode2', label:'2. 연매출 & 목표소득률 산출', desc:'필요경비/지출/세후순이익 기반으로 목표소득률/매출을 역산합니다.', icon:'📊' },
-      { id:'mode3', label:'3. 연매출 & 필요경비 산출', desc:'지출/목표소득률/세후순이익 기반으로 필요경비/매출을 역산합니다.', icon:'🧮' },
-      { id:'mode4', label:'4. 필요경비 & 세후순이익 산출', desc:'연매출/지출/목표소득률 기반으로 필요경비/세후순이익을 산출합니다.', icon:'💰' },
-      { id:'mode5', label:'5. 필요경비 & 목표소득률 산출', desc:'연매출/지출/세후순이익 기반으로 필요경비/목표소득률을 역산합니다.', icon:'🎯' }
-    ];
-
-    const ICON_MAP = {
-      'TrendingUp':'📈','PieChart':'📊','Calculator':'🧮','DollarSign':'💰','Target':'🎯',
-      'Activity':'💡','FileText':'📄','RotateCcw':'🔄','Plus':'➕','Trash2':'🗑️','Save':'💾','ArrowRightCircle':'➡️'
-    };
-
-    /* ─────────────────────────────────────────────────────────────
-     * 2) Formatting Utils
-     * ───────────────────────────────────────────────────────────── */
-
-    const formatCurrency = (val) => new Intl.NumberFormat('ko-KR',{ style:'currency', currency:'KRW' }).format(val || 0);
-    const formatCompactCurrency = (val) => new Intl.NumberFormat('ko-KR',{ style:'decimal', maximumFractionDigits:0 }).format(Math.round(val || 0));
-    const formatRate = (rate) => (Number.isFinite(Number(rate)) ? Number(rate) : 0).toFixed(1);
-    const toPercent = (num) => (Number.isFinite(Number(num)) ? Number(num) : 0).toFixed(1);
-
-    /* ─────────────────────────────────────────────────────────────
-     * 3) State
-     * ───────────────────────────────────────────────────────────── */
-
-    let state = {
-      calculationMode: 'mode1',
-      inputs: { ...EMPTY_INPUTS },
-      lastCalculatedResults: { ...EMPTY_RESULTS }, // ✅ 초기 대시보드 0값
-      scenarios: [],
-      domRefs: {},
-    };
-
-    const isInputDisabled = (fieldName) => {
-      const m = state.calculationMode;
-      if (m === 'mode1') return fieldName === 'annualRevenue' || fieldName === 'afterTaxNetIncome';
-      if (m === 'mode2') return fieldName === 'annualRevenue' || fieldName === 'targetProfitRate';
-      if (m === 'mode3') return fieldName === 'annualRevenue' || fieldName === 'monthlyRequiredExpense';
-      if (m === 'mode4') return fieldName === 'monthlyRequiredExpense' || fieldName === 'afterTaxNetIncome';
-      if (m === 'mode5') return fieldName === 'monthlyRequiredExpense' || fieldName === 'targetProfitRate';
-      return false;
-    };
-
-    /* ─────────────────────────────────────────────────────────────
-     * 4) API Status Badge
-     * ───────────────────────────────────────────────────────────── */
-
-    function renderApiStatusBadge() {
-      const el = state.domRefs.apiStatusBadge;
-      const sub = state.domRefs.apiStatusSub;
-      if (!el || !sub) return;
-
-      const s = API_STATUS.state;
-      const msg = API_STATUS.message;
-
-      const cls =
-        s === "ok" ? "bg-emerald-50 text-emerald-700 border-emerald-200" :
-        s === "checking" ? "bg-amber-50 text-amber-700 border-amber-200" :
-        s === "error" ? "bg-red-50 text-red-700 border-red-200" :
-        "bg-slate-50 text-slate-600 border-slate-200";
-
-      el.className = `text-xs font-semibold px-3 py-1.5 rounded-full border ${cls} flex items-center gap-2`;
-      el.innerHTML = `
-        <span class="inline-block h-2 w-2 rounded-full ${s==="ok"?"bg-emerald-500":s==="checking"?"bg-amber-500":s==="error"?"bg-red-500":"bg-slate-400"}"></span>
-        API ${s === "ok" ? "연결됨" : s === "checking" ? "확인중" : s === "error" ? "오류" : "대기"}
-      `;
-
-      const year = API_STATUS.meta?.year ?? "-";
-      const checked = API_STATUS.lastCheckedAt ? new Date(API_STATUS.lastCheckedAt).toLocaleString() : "-";
-      sub.textContent = `${msg} · year=${year} · ${checked}`;
+    async function serverCalc(mode, inputs) {
+      const res = await apiPost("/calc", { app: "pro-consulting", mode, inputs });
+      if (!res?.ok) throw new Error(res?.error || "calc_failed");
+      return res.result;
     }
 
     async function checkApiConnection() {
@@ -192,27 +108,180 @@
       }
 
       renderApiStatusBadge();
-      // ✅ 여기서는 계산/대시보드 갱신하지 않음 (초기 0 유지)
     }
 
-    /* ─────────────────────────────────────────────────────────────
-     * 5) Server Calculate (단건)
-     * ───────────────────────────────────────────────────────────── */
+    /* =========================
+      1) 포맷터(캐시)
+    ========================= */
 
-    async function serverCalc(mode, inputs) {
-      const res = await apiPost("/calc", { app: "pro-consulting", mode, inputs });
-      if (!res?.ok) throw new Error(res?.error || "calc_failed");
-      return res.result;
+    const NF_KRW = new Intl.NumberFormat("ko-KR", { style: "currency", currency: "KRW" });
+    const NF_DEC0 = new Intl.NumberFormat("ko-KR", { style: "decimal", maximumFractionDigits: 0 });
+
+    function formatCurrency(val) {
+      return NF_KRW.format(Number(val || 0));
+    }
+    function formatCompactCurrency(val) {
+      return NF_DEC0.format(Math.round(Number(val || 0)));
+    }
+    function formatRate(rate) {
+      return (Number.isFinite(Number(rate)) ? Number(rate) : 0).toFixed(1);
+    }
+    function toPercent(num) {
+      return (Number.isFinite(Number(num)) ? Number(num) : 0).toFixed(1);
     }
 
-    /* ─────────────────────────────────────────────────────────────
-     * 6) Render
-     * ───────────────────────────────────────────────────────────── */
+    /* =========================
+      2) UI/모드/필드 설정
+    ========================= */
 
-    const createCard = (title, val1, val2, isPercent, iconKey, color) => {
+    const EMPTY_INPUTS = {
+      annualRevenue: 0,
+      monthlyExpense: 0,
+      monthlyRequiredExpense: 0,
+      targetProfitRate: 0,
+      afterTaxNetIncome: 0
+    };
+
+    const EMPTY_RESULTS = {
+      annualRev: 0, monthlyRev: 0,
+      annualExp: 0, monthlyExp: 0,
+      annualReqExp: 0, monthlyReqExp: 0,
+      annualIncomeAmountActual: 0, annualIncomeAmountTarget: 0,
+      actualProfitRate: 0, targetProfitRate: 0,
+      annualNetIncome: 0, monthlyNetIncome: 0,
+      annualTax: 0, monthlyTax: 0, annualTaxRate: 0,
+      annualPension: 0, monthlyPension: 0,
+      annualInsurance: 0, monthlyInsurance: 0
+    };
+
+    const INPUT_FIELDS = [
+      { name: "annualRevenue", resultName: "annualRev" },
+      { name: "monthlyExpense", resultName: "monthlyExp" },
+      { name: "monthlyRequiredExpense", resultName: "monthlyReqExp" },
+      { name: "targetProfitRate", resultName: "targetProfitRate" },
+      { name: "afterTaxNetIncome", resultName: "monthlyNetIncome" }
+    ];
+
+    const DASHBOARD_CONFIG = {
+      mode1: [
+        { title:"예상 매출", keyAnn:"annualRev", keyMon:"monthlyRev", icon:"TrendingUp", color:"bg-emerald-500" },
+        { title:"예상 세후순이익", keyAnn:"annualNetIncome", keyMon:"monthlyNetIncome", icon:"DollarSign", color:"bg-blue-500" }
+      ],
+      mode2: [
+        { title:"예상 매출", keyAnn:"annualRev", keyMon:"monthlyRev", icon:"TrendingUp", color:"bg-emerald-500" },
+        { title:"목표소득률", keyVal:"targetProfitRate", isPercent:true, icon:"Target", color:"bg-purple-500" }
+      ],
+      mode3: [
+        { title:"예상 매출", keyAnn:"annualRev", keyMon:"monthlyRev", icon:"TrendingUp", color:"bg-emerald-500" },
+        { title:"필요경비", keyAnn:"annualReqExp", keyMon:"monthlyReqExp", icon:"Calculator", color:"bg-orange-500" }
+      ],
+      mode4: [
+        { title:"필요경비", keyAnn:"annualReqExp", keyMon:"monthlyReqExp", icon:"Calculator", color:"bg-orange-500" },
+        { title:"예상 세후순이익", keyAnn:"annualNetIncome", keyMon:"monthlyNetIncome", icon:"DollarSign", color:"bg-blue-500" }
+      ],
+      mode5: [
+        { title:"필요경비", keyAnn:"annualReqExp", keyMon:"monthlyReqExp", icon:"Calculator", color:"bg-orange-500" },
+        { title:"목표소득률", keyVal:"targetProfitRate", isPercent:true, icon:"Target", color:"bg-purple-500" }
+      ]
+    };
+
+    const SIMULATION_MODES = [
+      { id:"mode1", label:"1. 연매출 & 세후순이익 산출", desc:"월지출/월필요경비/목표소득률을 기반으로 연매출/순이익을 역산합니다.", icon:"📈" },
+      { id:"mode2", label:"2. 연매출 & 목표소득률 산출", desc:"필요경비/지출/세후순이익 기반으로 목표소득률/매출을 역산합니다.", icon:"📊" },
+      { id:"mode3", label:"3. 연매출 & 필요경비 산출", desc:"지출/목표소득률/세후순이익 기반으로 필요경비/매출을 역산합니다.", icon:"🧮" },
+      { id:"mode4", label:"4. 필요경비 & 세후순이익 산출", desc:"연매출/지출/목표소득률 기반으로 필요경비/세후순이익을 산출합니다.", icon:"💰" },
+      { id:"mode5", label:"5. 필요경비 & 목표소득률 산출", desc:"연매출/지출/세후순이익 기반으로 필요경비/목표소득률을 역산합니다.", icon:"🎯" }
+    ];
+
+    const ICON_MAP = {
+      TrendingUp:"📈",
+      PieChart:"📊",
+      Calculator:"🧮",
+      DollarSign:"💰",
+      Target:"🎯",
+      FileText:"📄"
+    };
+
+    function isInputDisabled(fieldName, mode) {
+      if (mode === "mode1") return fieldName === "annualRevenue" || fieldName === "afterTaxNetIncome";
+      if (mode === "mode2") return fieldName === "annualRevenue" || fieldName === "targetProfitRate";
+      if (mode === "mode3") return fieldName === "annualRevenue" || fieldName === "monthlyRequiredExpense";
+      if (mode === "mode4") return fieldName === "monthlyRequiredExpense" || fieldName === "afterTaxNetIncome";
+      if (mode === "mode5") return fieldName === "monthlyRequiredExpense" || fieldName === "targetProfitRate";
+      return false;
+    }
+
+    /* =========================
+      3) 상태(state) 및 DOM 캐시
+    ========================= */
+
+    const state = {
+      calculationMode: "mode1",
+      inputs: { ...EMPTY_INPUTS },
+      lastCalculatedResults: { ...EMPTY_RESULTS },
+      scenarios: [],
+      nextScenarioId: 1,
+      dom: {
+        modeSelectors: null,
+        dashboardCards: null,
+        dashboardInsightMode: null,
+        dashboardInsightText: null,
+        scenarioTableBody: null,
+        addScenarioBtn: null,
+        resetInputsBtn: null,
+        headerResetBtn: null,
+        clearScenariosBtn: null,
+        excelBtn: null,
+        apiStatusBadge: null,
+        apiStatusSub: null,
+        apiRetryBtn: null,
+        inputs: {},
+        inputLabels: {}
+      }
+    };
+
+    /* =========================
+      4) 상단 API 배지 렌더링
+    ========================= */
+
+    function renderApiStatusBadge() {
+      const el = state.dom.apiStatusBadge;
+      const sub = state.dom.apiStatusSub;
+      if (!el || !sub) return;
+
+      const s = API_STATUS.state;
+      const msg = API_STATUS.message;
+
+      const cls =
+        s === "ok" ? "bg-emerald-50 text-emerald-700 border-emerald-200" :
+        s === "checking" ? "bg-amber-50 text-amber-700 border-amber-200" :
+        s === "error" ? "bg-red-50 text-red-700 border-red-200" :
+        "bg-slate-50 text-slate-600 border-slate-200";
+
+      el.className = `text-xs font-semibold px-3 py-1.5 rounded-full border ${cls} flex items-center gap-2`;
+      el.innerHTML = `
+        <span class="inline-block h-2 w-2 rounded-full ${
+          s==="ok" ? "bg-emerald-500" :
+          s==="checking" ? "bg-amber-500" :
+          s==="error" ? "bg-red-500" : "bg-slate-400"
+        }"></span>
+        API ${s === "ok" ? "연결됨" : s === "checking" ? "확인중" : s === "error" ? "오류" : "대기"}
+      `;
+
+      const year = API_STATUS.meta?.year ?? "-";
+      const checked = API_STATUS.lastCheckedAt ? new Date(API_STATUS.lastCheckedAt).toLocaleString() : "-";
+      sub.textContent = `${msg} · year=${year} · ${checked}`;
+    }
+
+    /* =========================
+      5) 대시보드 렌더링
+    ========================= */
+
+    function createCard(title, val1, val2, isPercent, iconKey, color) {
       const icon = ICON_MAP[iconKey] || iconKey;
-      const v1 = isPercent ? (Number(val1||0).toFixed(1) + '%') : formatCurrency(Math.round(val1||0));
-      const v2 = isPercent ? null : formatCurrency(Math.round(val2||0));
+      const v1 = isPercent ? (Number(val1 || 0).toFixed(1) + "%") : formatCurrency(Math.round(val1 || 0));
+      const v2 = isPercent ? null : formatCurrency(Math.round(val2 || 0));
+
       return `
         <div class="bg-white rounded-xl p-5 shadow-sm border border-slate-200 relative overflow-hidden">
           <div class="absolute top-0 right-0 p-2 rounded-bl-xl opacity-10 ${color}">${icon}</div>
@@ -222,7 +291,7 @@
           </h4>
           <div class="space-y-3">
             <div class="flex justify-between items-end border-b border-slate-100 pb-2">
-              <span class="text-xs text-slate-400">${isPercent ? '비율' : '연간'}</span>
+              <span class="text-xs text-slate-400">${isPercent ? "비율" : "연간"}</span>
               <span class="text-lg font-bold text-slate-800">${v1}</span>
             </div>
             ${v2 ? `
@@ -230,18 +299,18 @@
                 <span class="text-xs text-slate-400">월간</span>
                 <span class="text-lg font-bold text-slate-800">${v2}</span>
               </div>
-            ` : ''}
+            ` : ""}
           </div>
-        </div>`;
-    };
+        </div>
+      `;
+    }
 
-    const createFixedResultCard = (title, value1Label, value1, value2Label, value2, iconKey, colorText="text-slate-800") => {
-      const icon = ICON_MAP[iconKey] || iconKey;
-      if (title === '소득률') {
+    function createFixedResultCard(title, value1, value2) {
+      if (title === "소득률") {
         return `
           <div class="bg-slate-50 rounded-xl p-5 border border-slate-200">
             <h4 class="text-sm font-bold text-slate-500 mb-3 flex items-center gap-2">
-              <span>${icon}</span> ${title}
+              <span>${ICON_MAP.PieChart}</span> ${title}
               <span class="text-xs font-normal text-slate-400 bg-slate-200 px-2 py-0.5 rounded-full">고정</span>
             </h4>
             <div class="space-y-3">
@@ -254,114 +323,124 @@
                 <span class="text-lg font-bold text-slate-800">${value2}</span>
               </div>
             </div>
-          </div>`;
+          </div>
+        `;
       }
+
       return `
         <div class="bg-slate-50 rounded-xl p-5 border border-slate-200">
           <h4 class="text-sm font-bold text-slate-500 mb-3 flex items-center gap-2">
-            <span class="text-slate-400">${icon}</span> ${title}
+            <span class="text-slate-400">${ICON_MAP.FileText}</span> ${title}
             <span class="text-xs font-normal text-slate-400 bg-slate-200 px-2 py-0.5 rounded-full">고정</span>
           </h4>
           <div class="space-y-3">
             <div class="flex justify-between items-center border-b border-slate-100 pb-2">
-              <span class="text-xs text-slate-400">${value1Label}</span>
-              <span class="text-lg font-bold ${colorText}">${value1}</span>
+              <span class="text-xs text-slate-400">연간</span>
+              <span class="text-lg font-bold text-slate-800">${value1}</span>
             </div>
-            ${value2Label ? `
-              <div class="flex justify-between items-center">
-                <span class="text-xs text-slate-400">${value2Label}</span>
-                <span class="text-lg font-bold ${colorText}">${value2}</span>
-              </div>
-            ` : ''}
+            <div class="flex justify-between items-center">
+              <span class="text-xs text-slate-400">월간</span>
+              <span class="text-lg font-bold text-slate-800">${value2}</span>
+            </div>
           </div>
-        </div>`;
-    };
+        </div>
+      `;
+    }
 
-    const renderDashboard = () => {
+    function renderDashboard() {
       const res = state.lastCalculatedResults;
-      const config = DASHBOARD_CONFIG[state.calculationMode] || DASHBOARD_CONFIG['mode1'];
+      const config = DASHBOARD_CONFIG[state.calculationMode] || DASHBOARD_CONFIG.mode1;
 
       const cardsHtml = config.map(c => {
         const annualVal = c.isPercent ? res[c.keyVal] : res[c.keyAnn];
         const monthlyVal = c.isPercent ? 0 : res[c.keyMon];
         return createCard(c.title, annualVal, monthlyVal, c.isPercent, c.icon, c.color);
-      }).join('');
+      }).join("");
 
       const actRate = `${formatRate(res.actualProfitRate)}%`;
       const tgtRate = `${formatRate(res.targetProfitRate)}%`;
 
       const fixedCardsHtml = `
-        ${createFixedResultCard("소득률", null, actRate, null, tgtRate, "PieChart")}
-        ${createFixedResultCard("종합소득세·지방세", "연간", formatCurrency(res.annualTax), "월간", formatCurrency(res.monthlyTax), "FileText")}
+        ${createFixedResultCard("소득률", actRate, tgtRate)}
+        ${createFixedResultCard("종합소득세·지방세", formatCurrency(res.annualTax), formatCurrency(res.monthlyTax))}
       `;
 
-      state.domRefs.dashboardCards.innerHTML = `
+      state.dom.dashboardCards.innerHTML = `
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">${cardsHtml}</div>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">${fixedCardsHtml}</div>
       `;
 
-      const modeLabel = SIMULATION_MODES.find(m => m.id === state.calculationMode)?.label || '';
-      state.domRefs.dashboardInsightMode.textContent = modeLabel.split('.')[1]?.trim() || modeLabel;
+      const modeLabel = SIMULATION_MODES.find(m => m.id === state.calculationMode)?.label || "";
+      state.dom.dashboardInsightMode.textContent = modeLabel.split(".")[1]?.trim() || modeLabel;
 
       const industryAvg = 40;
       const diff = industryAvg - (res.actualProfitRate || 0);
-      const diffText = diff > 0 ? '낮습니다' : '높습니다';
+      const diffText = diff > 0 ? "낮습니다" : "높습니다";
 
-      state.domRefs.dashboardInsightText.innerHTML =
+      state.dom.dashboardInsightText.innerHTML =
         `현재 소득률(<strong>${actRate}</strong>)은 동종 업계 평균(${industryAvg}%) 대비 <strong>${Math.abs(diff).toFixed(1)}%</strong> ${diffText}.<br/>
          필요경비를 <strong>₩${formatCompactCurrency(res.monthlyReqExp)}</strong>으로 유지할 경우, 목표 소득률 달성을 위해 연매출 <strong>₩${formatCompactCurrency(res.annualRev)}</strong>이 필요합니다.`;
-    };
+    }
 
-    const updateInputForm = () => {
-      const inputs = state.inputs;
-      const results = state.lastCalculatedResults;
+    /* =========================
+      6) 입력 폼 렌더링/동기화
+      - disabled input은 "결과값"을 표시한다.
+      - enabled input은 "사용자 입력값"을 표시한다.
+      - 정책상 입력 중 계산이 없으므로, enabled input은 사용자가 넣은 값 그대로 유지.
+    ========================= */
 
-      INPUT_FIELDS.forEach(field => {
-        const input = document.querySelector(`[name="${field.name}"]`);
-        if (!input) return;
+    function updateInputForm() {
+      const mode = state.calculationMode;
 
-        const disabled = isInputDisabled(field.name);
+      for (const f of INPUT_FIELDS) {
+        const inputEl = state.dom.inputs[f.name];
+        if (!inputEl) continue;
 
-        // ✅ "겉으로만" 비활성이 아니라 진짜 입력 차단
-        input.disabled = disabled;
-        input.setAttribute('aria-disabled', disabled ? 'true' : 'false');
+        const disabled = isInputDisabled(f.name, mode);
+        inputEl.disabled = disabled;
 
-        const label = input.closest('div.space-y-5 > div')?.querySelector('label span');
-
-        input.className = `w-full px-4 py-2.5 rounded-lg border transition-colors ${
+        inputEl.className = `w-full px-4 py-2.5 rounded-lg border transition-colors ${
           disabled
-            ? 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed'
-            : 'bg-white border-slate-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500'
+            ? "bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed"
+            : "bg-white border-slate-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
         }`;
 
-        input.placeholder = disabled ? "자동 계산" : "0";
-        if (label) label.style.display = disabled ? 'inline' : 'none';
+        inputEl.placeholder = disabled ? "자동 계산" : "0";
 
-        let val = disabled ? results[field.resultName] : inputs[field.name];
+        const labelSpan = state.dom.inputLabels[f.name];
+        if (labelSpan) labelSpan.style.display = disabled ? "inline" : "none";
 
-        // ✅ 초기 0일 때 자동 산출칸은 빈칸으로 두고 싶으면 아래처럼:
-        // if (disabled && (Number(val) || 0) === 0) val = 0; // (현재는 0이면 빈칸 처리되게 아래 로직으로 둠)
+        const srcVal = disabled ? state.lastCalculatedResults[f.resultName] : state.inputs[f.name];
 
-        if (document.activeElement !== input || disabled) {
-          if (field.name === 'targetProfitRate') {
-            input.value = Number.isFinite(Number(val)) ? Number(val).toFixed(2) : '0.00';
+        if (document.activeElement !== inputEl || disabled) {
+          if (f.name === "targetProfitRate") {
+            inputEl.value = Number.isFinite(Number(srcVal)) ? Number(srcVal).toFixed(2) : "0.00";
           } else {
-            const n = Math.round(Number(val) || 0);
-            input.value = n ? n.toLocaleString() : '';
+            const n = Math.round(Number(srcVal) || 0);
+            inputEl.value = n ? n.toLocaleString() : "";
           }
         }
-      });
-    };
+      }
+    }
 
-    const renderModeSelectors = () => {
-      state.domRefs.modeSelectors.innerHTML = SIMULATION_MODES.map(mode => {
+    /* =========================
+      7) 모드 선택 UI 렌더링
+    ========================= */
+
+    function renderModeSelectors() {
+      state.dom.modeSelectors.innerHTML = SIMULATION_MODES.map(mode => {
         const isActive = state.calculationMode === mode.id;
-        const activeClass = isActive ? 'border-blue-600 bg-blue-50 ring-2 ring-blue-100 ring-offset-2 shadow-md' : 'border-slate-200 bg-white hover:border-blue-300 hover:bg-blue-50/30';
-        const iconClass = isActive ? 'bg-blue-200 text-blue-700' : 'bg-slate-100 text-slate-500 group-hover:bg-blue-100 group-hover:text-blue-600';
-        const labelClass = isActive ? 'text-blue-700' : 'text-slate-700';
-        const indicator = isActive ? '<div class="h-2 w-2 rounded-full bg-blue-600 animate-pulse mt-1"></div>' : '';
+        const activeClass = isActive
+          ? "border-blue-600 bg-blue-50 ring-2 ring-blue-100 ring-offset-2 shadow-md"
+          : "border-slate-200 bg-white hover:border-blue-300 hover:bg-blue-50/30";
+        const iconClass = isActive
+          ? "bg-blue-200 text-blue-700"
+          : "bg-slate-100 text-slate-500 group-hover:bg-blue-100 group-hover:text-blue-600";
+        const labelClass = isActive ? "text-blue-700" : "text-slate-700";
+        const indicator = isActive ? '<div class="h-2 w-2 rounded-full bg-blue-600 animate-pulse mt-1"></div>' : "";
+
         return `
-          <button onclick="setCalculationMode('${mode.id}')" class="mode-btn relative p-4 rounded-xl border-2 text-left transition-all group ${activeClass}" data-mode="${mode.id}">
+          <button class="mode-btn relative p-4 rounded-xl border-2 text-left transition-all group ${activeClass}" data-mode="${mode.id}">
             <div class="flex justify-between items-start mb-2">
               <div class="flex items-center gap-2">
                 <div class="p-1.5 rounded-lg ${iconClass}">${mode.icon}</div>
@@ -370,89 +449,132 @@
               ${indicator}
             </div>
             <p class="text-xs text-slate-500 pl-9">${mode.desc}</p>
-          </button>`;
-      }).join('');
-    };
+          </button>
+        `;
+      }).join("");
+    }
 
-    const renderScenarioTable = () => {
-      const tbody = state.domRefs.scenarioTableBody;
+    /* =========================
+      8) 시나리오 테이블
+      - 성능: 전체 재렌더 대신 append/remove로 부분 업데이트
+    ========================= */
+
+    function renderScenarioEmpty() {
+      state.dom.scenarioTableBody.innerHTML =
+        `<tr id="scenario-empty-row">
+          <td colspan="23" class="px-6 py-12 text-center text-slate-400 bg-slate-50/30">
+            입력 후 🧮 계산하기를 눌러 시나리오를 추가해주세요.
+          </td>
+        </tr>`;
+    }
+
+    function scenarioRowHtml(item, idx) {
+      const netRatio = item.annualRev ? ((item.annualNetIncome / item.annualRev) * 100).toFixed(1) : "0.0";
+      const taxRatio = item.annualRev ? ((item.annualTax / item.annualRev) * 100).toFixed(1) : "0.0";
+
+      return `
+        <tr class="hover:bg-slate-50/80 transition-colors" id="scenario-row-${item.id}">
+          <td class="px-3 py-3 text-center font-medium text-slate-400 border-r border-slate-100 sticky sticky-col sticky-col-1 bg-white z-10">${idx}</td>
+
+          <td class="px-4 py-3 text-center border-r border-slate-100 sticky sticky-col sticky-col-2 bg-white z-10">
+            <span class="px-2 py-0.5 rounded-full text-[10px] font-medium bg-slate-100 text-slate-600 truncate block w-24 mx-auto">
+              ${item.mode.split(".")[0]} 시나리오
+            </span>
+          </td>
+
+          <td class="px-4 py-3 text-center text-blue-700 font-bold bg-blue-50/30 border-r border-slate-100">${(item.actualProfitRate||0).toFixed(1)}%</td>
+          <td class="px-4 py-3 text-center text-blue-600 bg-blue-50/30 border-r border-slate-100">${(item.targetProfitRate||0).toFixed(1)}%</td>
+
+          <td class="px-2 py-3 text-right text-slate-700 font-medium bg-slate-50/30 border-r border-slate-100">${formatCompactCurrency(item.annualRev)}</td>
+          <td class="px-2 py-3 text-right text-slate-700 bg-slate-50/30 border-r border-slate-100">${formatCompactCurrency(item.monthlyRev)}</td>
+
+          <td class="px-2 py-3 text-right text-slate-700 bg-slate-100/50 border-r border-slate-100">${formatCompactCurrency(item.annualExp)}</td>
+          <td class="px-2 py-3 text-right text-slate-700 bg-slate-100/50 border-r border-slate-100">${formatCompactCurrency(item.monthlyExp)}</td>
+
+          <td class="px-2 py-3 text-right text-slate-700 bg-slate-100/50 border-r border-slate-100">${formatCompactCurrency(item.annualReqExp)}</td>
+          <td class="px-2 py-3 text-right text-slate-700 bg-slate-100/50 border-r border-slate-100">${formatCompactCurrency(item.monthlyReqExp)}</td>
+
+          <td class="px-2 py-3 text-right text-slate-700 bg-slate-50/30 border-r border-slate-100">${formatCompactCurrency(item.annualIncomeAmountActual)}</td>
+          <td class="px-2 py-3 text-right text-slate-700 bg-slate-50/30 border-r border-slate-100">${formatCompactCurrency(item.annualIncomeAmountTarget)}</td>
+
+          <td class="px-2 py-3 text-right font-bold text-blue-700 bg-blue-50/30 border-r border-slate-100">${formatCompactCurrency(item.annualNetIncome)}</td>
+          <td class="px-2 py-3 text-right font-bold text-blue-700 bg-blue-50/30 border-r border-slate-100">${formatCompactCurrency(item.monthlyNetIncome)}</td>
+          <td class="px-2 py-3 text-center font-bold text-blue-600 bg-blue-50/30 border-r border-slate-100">${netRatio}%</td>
+
+          <td class="px-2 py-3 text-right text-slate-500 border-r border-slate-100">${formatCompactCurrency(item.annualTax)}</td>
+          <td class="px-2 py-3 text-right text-slate-500 border-r border-slate-100">${formatCompactCurrency(item.monthlyTax)}</td>
+          <td class="px-2 py-3 text-center text-slate-500 border-r border-slate-100">${taxRatio}%</td>
+
+          <td class="px-2 py-3 text-right text-slate-500 border-r border-slate-100">${formatCompactCurrency(item.annualPension)}</td>
+          <td class="px-2 py-3 text-right text-slate-500 border-r border-slate-100">${formatCompactCurrency(item.monthlyPension)}</td>
+
+          <td class="px-2 py-3 text-right text-slate-500 border-r border-slate-100">${formatCompactCurrency(item.annualInsurance)}</td>
+          <td class="px-2 py-3 text-right text-slate-500 border-r border-slate-100">${formatCompactCurrency(item.monthlyInsurance)}</td>
+
+          <td class="px-3 py-3 text-center">
+            <button class="remove-btn text-slate-400 hover:text-red-500 transition-colors p-1" data-id="${item.id}">🗑️</button>
+          </td>
+        </tr>
+      `;
+    }
+
+    function appendScenarioRow(item) {
+      const emptyRow = document.getElementById("scenario-empty-row");
+      if (emptyRow) emptyRow.remove();
+
+      const idx = state.scenarios.length; // append 직전 length가 곧 현재 번호
+      state.dom.scenarioTableBody.insertAdjacentHTML("beforeend", scenarioRowHtml(item, idx));
+    }
+
+    function renumberScenarioRows() {
+      // 삭제 후 번호만 재정렬(첫 번째 칸만 업데이트)
+      // sticky col-1 셀은 각 row의 첫 td 이므로, 그 td만 순회 업데이트
+      const rows = state.dom.scenarioTableBody.querySelectorAll('tr[id^="scenario-row-"]');
+      let i = 1;
+      rows.forEach(row => {
+        const firstTd = row.querySelector("td");
+        if (firstTd) firstTd.textContent = String(i++);
+      });
+    }
+
+    function removeScenarioRow(id) {
+      const tr = document.getElementById(`scenario-row-${id}`);
+      if (tr) tr.remove();
+
       if (state.scenarios.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="23" class="px-6 py-12 text-center text-slate-400 bg-slate-50/30">입력 후 🧮 계산하기를 눌러 시나리오를 추가해주세요.</td></tr>`;
-        return;
+        renderScenarioEmpty();
+      } else {
+        renumberScenarioRows();
       }
+    }
 
-      tbody.innerHTML = state.scenarios.map((item, idx) => {
-        const netRatio = item.annualRev ? ((item.annualNetIncome / item.annualRev) * 100).toFixed(1) : '0.0';
-        const taxRatio = item.annualRev ? ((item.annualTax / item.annualRev) * 100).toFixed(1) : '0.0';
-        return `
-          <tr class="hover:bg-slate-50/80 transition-colors">
-            <td class="px-3 py-3 text-center font-medium text-slate-400 border-r border-slate-100 sticky sticky-col sticky-col-1 bg-white z-10">${idx + 1}</td>
-            <td class="px-4 py-3 text-center border-r border-slate-100 sticky sticky-col sticky-col-2 bg-white z-10">
-              <span class="px-2 py-0.5 rounded-full text-[10px] font-medium bg-slate-100 text-slate-600 truncate block w-24 mx-auto">${item.mode.split('.')[0]} 시나리오</span>
-            </td>
+    /* =========================
+      9) 엑셀 다운로드
+    ========================= */
 
-            <td class="px-4 py-3 text-center text-blue-700 font-bold bg-blue-50/30 border-r border-slate-100">${(item.actualProfitRate||0).toFixed(1)}%</td>
-            <td class="px-4 py-3 text-center text-blue-600 bg-blue-50/30 border-r border-slate-100">${(item.targetProfitRate||0).toFixed(1)}%</td>
-
-            <td class="px-2 py-3 text-right text-slate-700 font-medium bg-slate-50/30 border-r border-slate-100">${formatCompactCurrency(item.annualRev)}</td>
-            <td class="px-2 py-3 text-right text-slate-700 bg-slate-50/30 border-r border-slate-100">${formatCompactCurrency(item.monthlyRev)}</td>
-
-            <td class="px-2 py-3 text-right text-slate-700 bg-slate-100/50 border-r border-slate-100">${formatCompactCurrency(item.annualExp)}</td>
-            <td class="px-2 py-3 text-right text-slate-700 bg-slate-100/50 border-r border-slate-100">${formatCompactCurrency(item.monthlyExp)}</td>
-
-            <td class="px-2 py-3 text-right text-slate-700 bg-slate-100/50 border-r border-slate-100">${formatCompactCurrency(item.annualReqExp)}</td>
-            <td class="px-2 py-3 text-right text-slate-700 bg-slate-100/50 border-r border-slate-100">${formatCompactCurrency(item.monthlyReqExp)}</td>
-
-            <td class="px-2 py-3 text-right text-slate-700 bg-slate-50/30 border-r border-slate-100">${formatCompactCurrency(item.annualIncomeAmountActual)}</td>
-            <td class="px-2 py-3 text-right text-slate-700 bg-slate-50/30 border-r border-slate-100">${formatCompactCurrency(item.annualIncomeAmountTarget)}</td>
-
-            <td class="px-2 py-3 text-right font-bold text-blue-700 bg-blue-50/30 border-r border-slate-100">${formatCompactCurrency(item.annualNetIncome)}</td>
-            <td class="px-2 py-3 text-right font-bold text-blue-700 bg-blue-50/30 border-r border-slate-100">${formatCompactCurrency(item.monthlyNetIncome)}</td>
-            <td class="px-2 py-3 text-center font-bold text-blue-600 bg-blue-50/30 border-r border-slate-100">${netRatio}%</td>
-
-            <td class="px-2 py-3 text-right text-slate-500 border-r border-slate-100">${formatCompactCurrency(item.annualTax)}</td>
-            <td class="px-2 py-3 text-right text-slate-500 border-r border-slate-100">${formatCompactCurrency(item.monthlyTax)}</td>
-            <td class="px-2 py-3 text-center text-slate-500 border-r border-slate-100">${taxRatio}%</td>
-
-            <td class="px-2 py-3 text-right text-slate-500 border-r border-slate-100">${formatCompactCurrency(item.annualPension)}</td>
-            <td class="px-2 py-3 text-right text-slate-500 border-r border-slate-100">${formatCompactCurrency(item.monthlyPension)}</td>
-
-            <td class="px-2 py-3 text-right text-slate-500 border-r border-slate-100">${formatCompactCurrency(item.annualInsurance)}</td>
-            <td class="px-2 py-3 text-right text-slate-500 border-r border-slate-100">${formatCompactCurrency(item.monthlyInsurance)}</td>
-
-            <td class="px-3 py-3 text-center">
-              <button class="remove-btn text-slate-400 hover:text-red-500 transition-colors p-1" data-id="${item.id}">🗑️</button>
-            </td>
-          </tr>`;
-      }).join('');
-    };
-
-    /* ─────────────────────────────────────────────────────────────
-     * 7) Excel Export
-     * ───────────────────────────────────────────────────────────── */
-
-    const exportScenariosToExcel = () => {
+    function exportScenariosToExcel() {
       if (!window.XLSX || !state.scenarios.length) {
-        alert('데이터가 없거나 라이브러리 로드 중입니다.');
+        alert("데이터가 없거나 라이브러리 로드 중입니다.");
         return;
       }
 
       const header = [
-        'No', '구분(모드)',
-        '실제소득률(%)', '목표소득률(%)',
-        '연매출', '월매출',
-        '연지출', '월지출',
-        '연필요경비', '월필요경비',
-        '소득금액(실제)', '소득금액(목표)',
-        '연세후순이익', '월세후순이익', '세후순이익비율(%)',
-        '연종합소득세·지방세', '월종합소득세·지방세', '세금비율(연매출대비, %)',
-        '연국민연금', '월국민연금',
-        '연건강보험료(건보+장기요양)', '월건강보험료(건보+장기요양)'
+        "No","구분(모드)",
+        "실제소득률(%)","목표소득률(%)",
+        "연매출","월매출",
+        "연지출","월지출",
+        "연필요경비","월필요경비",
+        "소득금액(실제)","소득금액(목표)",
+        "연세후순이익","월세후순이익","세후순이익비율(%)",
+        "연종합소득세·지방세","월종합소득세·지방세","세금비율(연매출대비, %)",
+        "연국민연금","월국민연금",
+        "연건강보험료(건보+장기요양)","월건강보험료(건보+장기요양)"
       ];
 
       const rows = state.scenarios.map((s, i) => {
         const netRatio = s.annualRev ? ((s.annualNetIncome / s.annualRev) * 100) : 0;
         const taxRatio = s.annualRev ? ((s.annualTax / s.annualRev) * 100) : 0;
+
         return [
           i + 1,
           s.mode,
@@ -464,14 +586,15 @@
           Math.round(s.annualIncomeAmountActual), Math.round(s.annualIncomeAmountTarget),
           Math.round(s.annualNetIncome), Math.round(s.monthlyNetIncome),
           Number(toPercent(netRatio)),
-          Math.round(s.annualTax), Math.round(s.monthlyTax), Number(toPercent(taxRatio)),
+          Math.round(s.annualTax), Math.round(s.monthlyTax),
+          Number(toPercent(taxRatio)),
           Math.round(s.annualPension), Math.round(s.monthlyPension),
-          Math.round(s.annualInsurance), Math.round(s.monthlyInsurance),
+          Math.round(s.annualInsurance), Math.round(s.monthlyInsurance)
         ];
       });
 
       const ws = XLSX.utils.aoa_to_sheet([header, ...rows]);
-      ws['!cols'] = [
+      ws["!cols"] = [
         { wch: 5 }, { wch: 24 },
         { wch: 14 }, { wch: 14 },
         { wch: 14 }, { wch: 14 },
@@ -481,64 +604,68 @@
         { wch: 16 }, { wch: 16 }, { wch: 18 },
         { wch: 20 }, { wch: 20 }, { wch: 22 },
         { wch: 14 }, { wch: 14 },
-        { wch: 22 }, { wch: 22 },
+        { wch: 22 }, { wch: 22 }
       ];
 
       const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, 'Scenarios');
+      XLSX.utils.book_append_sheet(wb, ws, "Scenarios");
+
       const now = new Date();
-      const filename = `Pro-Consulting-Scenarios_${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}.xlsx`;
+      const filename = `Pro-Consulting-Scenarios_${now.getFullYear()}${String(now.getMonth()+1).padStart(2,"0")}${String(now.getDate()).padStart(2,"0")}.xlsx`;
       XLSX.writeFile(wb, filename);
-    };
+    }
 
-    /* ─────────────────────────────────────────────────────────────
-     * 8) Events (정책 변경: 계산하기를 눌러야만 결과 갱신)
-     * ───────────────────────────────────────────────────────────── */
+    /* =========================
+      10) 이벤트 핸들러
+    ========================= */
 
-    window.setCalculationMode = (modeId) => {
+    function setCalculationMode(modeId) {
       state.calculationMode = modeId;
       renderModeSelectors();
-      updateInputForm();   // ✅ 입력칸 disabled 상태만 갱신
-      renderDashboard();   // ✅ 현재 lastCalculatedResults(초기 0 또는 마지막 계산값)만 보여줌
-      // ❌ 모드 변경 시 서버 계산하지 않음
-    };
+      updateInputForm();
+      renderDashboard();
+    }
 
-    const handleInput = (e) => {
-      const { name, value, type } = e.target;
+    function handleInput(e) {
+      const el = e.target;
+      const name = el.name;
+      if (!name) return;
 
-      // ✅ 자동 산출칸은 입력 무시(방어)
-      if (isInputDisabled(name)) return;
+      if (isInputDisabled(name, state.calculationMode)) return;
 
-      let rawValue;
-      if (type === 'text' && ['annualRevenue','monthlyExpense','monthlyRequiredExpense','afterTaxNetIncome'].includes(name)) {
-        rawValue = Number(String(value).replace(/,/g, ''));
-      } else if (type === 'number' || name === 'targetProfitRate') {
-        rawValue = Number(value);
-      } else return;
+      const type = el.type;
+      const isMoneyText = (type === "text" && ["annualRevenue","monthlyExpense","monthlyRequiredExpense","afterTaxNetIncome"].includes(name));
+      const isNumber = (type === "number" || name === "targetProfitRate");
 
-      if (!Number.isNaN(rawValue)) {
-        state.inputs[name] = rawValue;
-        if (e.target.type === 'text') {
-          e.target.value = rawValue ? rawValue.toLocaleString() : '';
-        }
-        // ❌ 입력 시 서버 계산/대시보드 갱신하지 않음
-      }
-    };
+      if (!isMoneyText && !isNumber) return;
 
-    const handleAddScenario = async () => {
+      let rawValue = 0;
+      if (isMoneyText) rawValue = Number(String(el.value).replace(/,/g, ""));
+      else rawValue = Number(el.value);
+
+      if (Number.isNaN(rawValue)) return;
+
+      state.inputs[name] = rawValue;
+
+      // 입력 UX: 기존 동작 유지(입력 시 콤마 반영) — 커서 튐이 불편하면 blur 포맷으로 바꾸는 게 더 좋음
+      if (isMoneyText) el.value = rawValue ? rawValue.toLocaleString() : "";
+    }
+
+    async function handleAddScenario() {
       try {
         const result = await serverCalc(state.calculationMode, state.inputs);
 
-        // ✅ 계산하기를 눌렀을 때만 대시보드 갱신
         state.lastCalculatedResults = result;
 
-        const newId = state.scenarios.length > 0 ? Math.max(...state.scenarios.map(s => s.id)) + 1 : 1;
-        const newScenario = { id: newId, mode: SIMULATION_MODES.find(m => m.id === state.calculationMode).label, ...result };
-        state.scenarios = [...state.scenarios, newScenario];
+        const modeLabel = SIMULATION_MODES.find(m => m.id === state.calculationMode)?.label || "";
+        const newScenario = { id: state.nextScenarioId++, mode: modeLabel, ...result };
+
+        state.scenarios.push(newScenario);
 
         updateInputForm();
         renderDashboard();
-        renderScenarioTable();
+        appendScenarioRow(newScenario);
+
       } catch (e) {
         alert("계산 실패: 서버 응답을 확인하세요.");
         API_STATUS.state = "error";
@@ -546,77 +673,106 @@
         API_STATUS.lastCheckedAt = Date.now();
         renderApiStatusBadge();
       }
-    };
+    }
 
-    const handleRemoveScenario = (id) => {
+    function handleRemoveScenario(id) {
       state.scenarios = state.scenarios.filter(s => s.id !== id);
-      renderScenarioTable();
-    };
+      removeScenarioRow(id);
+    }
 
-    const handleResetInputs = () => {
+    function handleClearScenarios() {
+      state.scenarios = [];
+      state.dom.scenarioTableBody.innerHTML = "";
+      renderScenarioEmpty();
+    }
+
+    function handleResetAll() {
       state.inputs = { ...EMPTY_INPUTS };
-
-      // ✅ 리셋 시 대시보드는 다시 0값으로(‘계산하기’ 누르기 전 상태)
       state.lastCalculatedResults = { ...EMPTY_RESULTS };
+      state.scenarios = [];
+      state.nextScenarioId = 1;
 
       updateInputForm();
       renderDashboard();
-    };
 
-    const handleClearScenarios = () => {
-      state.scenarios = [];
-      renderScenarioTable();
-    };
+      state.dom.scenarioTableBody.innerHTML = "";
+      renderScenarioEmpty();
+    }
 
-    window.onload = () => {
-      state.domRefs = {
-        modeSelectors: document.getElementById('mode-selectors'),
-        dashboardCards: document.getElementById('dashboard-cards'),
-        dashboardInsightMode: document.getElementById('dashboard-insight-mode'),
-        dashboardInsightText: document.getElementById('dashboard-insight-text'),
-        scenarioTableBody: document.getElementById('scenario-table-body'),
-        addScenarioBtn: document.getElementById('add-scenario-btn'),
-        resetInputsBtn: document.getElementById('reset-inputs-btn'),
-        headerResetBtn: document.getElementById('header-reset-btn'),
-        clearScenariosBtn: document.getElementById('clear-scenarios-btn'),
-        excelBtn: document.getElementById('excel-download-btn'),
-        apiStatusBadge: document.getElementById('api-status-badge'),
-        apiStatusSub: document.getElementById('api-status-sub'),
-        apiRetryBtn: document.getElementById('api-retry-btn'),
-      };
+    /* =========================
+      11) 초기화(onload)
+    ========================= */
 
-      INPUT_FIELDS.forEach(field => {
-        const el = document.querySelector(`[name="${field.name}"]`);
-        if (el) el.addEventListener('input', handleInput);
+    window.addEventListener("load", () => {
+      state.dom.modeSelectors = document.getElementById("mode-selectors");
+      state.dom.dashboardCards = document.getElementById("dashboard-cards");
+      state.dom.dashboardInsightMode = document.getElementById("dashboard-insight-mode");
+      state.dom.dashboardInsightText = document.getElementById("dashboard-insight-text");
+      state.dom.scenarioTableBody = document.getElementById("scenario-table-body");
+
+      state.dom.addScenarioBtn = document.getElementById("add-scenario-btn");
+      state.dom.resetInputsBtn = document.getElementById("reset-inputs-btn");
+      state.dom.headerResetBtn = document.getElementById("header-reset-btn");
+      state.dom.clearScenariosBtn = document.getElementById("clear-scenarios-btn");
+      state.dom.excelBtn = document.getElementById("excel-download-btn");
+
+      state.dom.apiStatusBadge = document.getElementById("api-status-badge");
+      state.dom.apiStatusSub = document.getElementById("api-status-sub");
+      state.dom.apiRetryBtn = document.getElementById("api-retry-btn");
+
+      // 입력 요소 및 "자동 산출됨" 라벨 span 캐싱
+      INPUT_FIELDS.forEach(f => {
+        const inputEl = document.querySelector(`[name="${f.name}"]`);
+        state.dom.inputs[f.name] = inputEl;
+
+        // 해당 input이 속한 label의 span(자동 산출됨)을 찾아 캐싱
+        // 구조가 바뀌더라도 label 내 span만 유지되면 동작하도록 범위를 최소화
+        const wrapper = inputEl?.closest("div");
+        const labelSpan = wrapper?.querySelector("label span");
+        if (labelSpan) state.dom.inputLabels[f.name] = labelSpan;
+
+        if (inputEl) inputEl.addEventListener("input", handleInput);
       });
 
-      state.domRefs.addScenarioBtn.addEventListener('click', handleAddScenario);
-      state.domRefs.resetInputsBtn.addEventListener('click', handleResetInputs);
-      state.domRefs.headerResetBtn.addEventListener('click', handleResetInputs);
-      state.domRefs.clearScenariosBtn.addEventListener('click', handleClearScenarios);
-      state.domRefs.excelBtn.addEventListener('click', exportScenariosToExcel);
-      state.domRefs.apiRetryBtn.addEventListener('click', checkApiConnection);
+      // 버튼 이벤트
+      state.dom.addScenarioBtn?.addEventListener("click", handleAddScenario);
 
-      document.addEventListener('click', (e) => {
-        const modeBtn = e.target.closest('.mode-btn');
-        if (modeBtn) window.setCalculationMode(modeBtn.getAttribute('data-mode'));
-        const removeBtn = e.target.closest('.remove-btn');
-        if (removeBtn) handleRemoveScenario(Number(removeBtn.getAttribute('data-id')));
+      // 초기화 버튼(두 곳) 모두: 입력+대시보드+시나리오 전체 초기화
+      state.dom.resetInputsBtn?.addEventListener("click", handleResetAll);
+      state.dom.headerResetBtn?.addEventListener("click", handleResetAll);
+
+      state.dom.clearScenariosBtn?.addEventListener("click", handleClearScenarios);
+      state.dom.excelBtn?.addEventListener("click", exportScenariosToExcel);
+      state.dom.apiRetryBtn?.addEventListener("click", checkApiConnection);
+
+      // 모드 선택 + 시나리오 삭제 버튼은 이벤트 위임
+      document.addEventListener("click", (e) => {
+        const modeBtn = e.target.closest(".mode-btn");
+        if (modeBtn) {
+          const modeId = modeBtn.getAttribute("data-mode");
+          if (modeId) setCalculationMode(modeId);
+          return;
+        }
+
+        const removeBtn = e.target.closest(".remove-btn");
+        if (removeBtn) {
+          const id = Number(removeBtn.getAttribute("data-id"));
+          if (Number.isFinite(id)) handleRemoveScenario(id);
+        }
       });
 
-      // ✅ 초기 렌더(대시보드 0값)
+      // 최초 렌더(대시보드 0값 유지)
       renderModeSelectors();
       updateInputForm();
       renderDashboard();
-      renderScenarioTable();
+      renderScenarioEmpty();
       checkApiConnection();
-    };
+    });
   </script>
 </head>
 
 <body class="min-h-screen bg-slate-50 font-sans text-slate-900">
   <div id="app-root">
-    <!-- Header -->
     <header class="bg-white border-b border-slate-200 sticky top-0 z-30">
       <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
         <div class="flex items-center gap-3">
