@@ -308,10 +308,9 @@
     function createFixedResultCard(title, value1, value2) {
       if (title === "소득률") {
         return `
-          <div class="bg-slate-50 rounded-xl p-5 border border-slate-200">
+          <div class="bg-white rounded-xl p-5 shadow-sm border border-slate-200">
             <h4 class="text-sm font-bold text-slate-500 mb-3 flex items-center gap-2">
               <span>${ICON_MAP.PieChart}</span> ${title}
-              <span class="text-xs font-normal text-slate-400 bg-slate-200 px-2 py-0.5 rounded-full">고정</span>
             </h4>
             <div class="space-y-3">
               <div class="flex justify-between items-center border-b border-slate-100 pb-2">
@@ -328,10 +327,9 @@
       }
 
       return `
-        <div class="bg-slate-50 rounded-xl p-5 border border-slate-200">
+        <div class="bg-white rounded-xl p-5 shadow-sm border border-slate-200">
           <h4 class="text-sm font-bold text-slate-500 mb-3 flex items-center gap-2">
             <span class="text-slate-400">${ICON_MAP.FileText}</span> ${title}
-            <span class="text-xs font-normal text-slate-400 bg-slate-200 px-2 py-0.5 rounded-full">고정</span>
           </h4>
           <div class="space-y-3">
             <div class="flex justify-between items-center border-b border-slate-100 pb-2">
@@ -869,10 +867,10 @@
           </div>
 
           <div class="bg-slate-50 border border-slate-200 rounded-xl p-4 text-sm text-slate-600">
-            <div class="font-semibold text-slate-700 mb-1">요율/세율 기준</div>
+            <div class="font-semibold text-slate-700 mb-1">계산방식</div>
             <ul class="list-disc ml-5 space-y-1 text-[13px]">
-              <li>국민연금/건강보험료: <span class="font-semibold">서버 계산(근로자요율→10원절사→2배, 상·하한 clamp 포함)</span></li>
-              <li>종합소득세·지방세: <span class="font-semibold">소득세 산출 × 1.1</span></li>
+              <li>목표소득률이 0%이하인 경우 → 0% 표기</li>
+              <li>국민연금 및 건강보험료는 목표소득을 기준으로 도출됨</span></li>
             </ul>
           </div>
         </div>
@@ -894,14 +892,14 @@
                 <th rowspan="2" class="px-3 py-4 whitespace-nowrap text-center border-r border-slate-200 sticky sticky-col sticky-col-1 bg-slate-50 z-20">No</th>
                 <th rowspan="2" class="px-4 py-4 whitespace-nowrap text-center border-r border-slate-200 sticky sticky-col sticky-col-2 bg-slate-50 z-20">구분</th>
                 <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200 bg-blue-50 text-blue-800">소득률</th>
-                <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200 bg-slate-100 text-slate-800">매출</th>
-                <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200 bg-slate-100 text-slate-800">지출</th>
-                <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200 bg-slate-100 text-slate-800">필요 경비</th>
+                <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200 bg-slate-50 text-slate-800">매출</th>
+                <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200 bg-slate-50 text-slate-800">지출</th>
+                <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200 bg-slate-50 text-slate-800">필요경비</th>
                 <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200 bg-slate-50 text-slate-800">소득금액</th>
                 <th colspan="3" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200 bg-blue-50 text-blue-800">세후순이익</th>
-                <th colspan="3" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200">종합소득세·지방세</th>
+                <th colspan="3" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200">종합소득세<span class="text-[9px] text-slate-400 align-middle">(지방세포함)</span></th>
                 <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200">국민연금</th>
-                <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200">건강보험료</th>
+                <th colspan="2" class="px-2 py-2 whitespace-nowrap text-center border-r border-slate-200">건강보험료<span class="text-[9px] text-slate-400 align-middle">(장기요양포함)</span></th>
                 <th rowspan="2" class="px-3 py-4 text-center">관리</th>
               </tr>
               <tr class="bg-slate-50/50 text-[11px] text-slate-500">
@@ -917,22 +915,22 @@
                 <th class="px-2 py-2 text-center border-r border-slate-200 bg-slate-100/50 text-slate-800">연간</th>
                 <th class="px-2 py-2 text-center border-r border-slate-200 bg-slate-100/50 text-slate-800">월간</th>
 
-                <th class="px-2 py-2 text-center border-r border-slate-200 bg-slate-50/50 text-slate-800">실제</th>
-                <th class="px-2 py-2 text-center border-r border-slate-200 bg-slate-50/50 text-slate-800">목표</th>
+                <th class="px-2 py-2 text-center border-r border-slate-200 bg-slate-100/50 text-slate-800">실제</th>
+                <th class="px-2 py-2 text-center border-r border-slate-200 bg-slate-100/50 text-slate-800">목표</th>
 
-                <th class="px-2 py-2 text-center border-r border-slate-200 bg-blue-50/50 text-blue-800">연간</th>
-                <th class="px-2 py-2 text-center border-r border-slate-200 bg-blue-50/50 text-blue-800">월간</th>
-                <th class="px-2 py-2 text-center border-r border-slate-200 bg-blue-50/50 text-blue-800">비율</th>
+                <th class="px-2 py-2 text-center border-r border-slate-200 bg-blue-100/50 text-blue-800">연간</th>
+                <th class="px-2 py-2 text-center border-r border-slate-200 bg-blue-100/50 text-blue-800">월간</th>
+                <th class="px-2 py-2 text-center border-r border-slate-200 bg-blue-100/50 text-blue-800">비율</th>
 
-                <th class="px-2 py-2 text-center border-r border-slate-200">연간</th>
-                <th class="px-2 py-2 text-center border-r border-slate-200">월간</th>
-                <th class="px-2 py-2 text-center border-r border-slate-200">비율</th>
+                <th class="px-2 py-2 text-center border-r border-slate-200 bg-slate-100/50 text-slate-800">연간</th>
+                <th class="px-2 py-2 text-center border-r border-slate-200 bg-slate-100/50 text-slate-800">월간</th>
+                <th class="px-2 py-2 text-center border-r border-slate-200 bg-slate-100/50 text-slate-800">비율</th>
 
-                <th class="px-2 py-2 text-center border-r border-slate-200">연간</th>
-                <th class="px-2 py-2 text-center border-r border-slate-200">월간</th>
+                <th class="px-2 py-2 text-center border-r border-slate-200 bg-slate-100/50 text-slate-800">연간</th>
+                <th class="px-2 py-2 text-center border-r border-slate-200 bg-slate-100/50 text-slate-800">월간</th>
 
-                <th class="px-2 py-2 text-center border-r border-slate-200">연간</th>
-                <th class="px-2 py-2 text-center border-r border-slate-200">월간</th>
+                <th class="px-2 py-2 text-center border-r border-slate-200 bg-slate-100/50 text-slate-800">연간</th>
+                <th class="px-2 py-2 text-center border-r border-slate-200 bg-slate-100/50 text-slate-800">월간</th>
               </tr>
             </thead>
             <tbody id="scenario-table-body" class="divide-y divide-slate-100"></tbody>
