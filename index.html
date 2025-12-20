@@ -725,7 +725,7 @@
 
         // 해당 input이 속한 label의 span(자동 산출됨)을 찾아 캐싱
         // 구조가 바뀌더라도 label 내 span만 유지되면 동작하도록 범위를 최소화
-        const wrapper = inputEl?.closest("div");
+        const wrapper = inputEl?.closest("#input-form > div"); // 각 필드의 최상위 래퍼 div
         const labelSpan = wrapper?.querySelector("label span");
         if (labelSpan) state.dom.inputLabels[f.name] = labelSpan;
 
