@@ -25,12 +25,6 @@
       - "🔄 초기화"(헤더) / "🔄 입력 초기화"(좌측) 버튼은
         입력 + 대시보드 + 시나리오까지 전부 초기화한다.
 
-      ✅ 서버(AppError) 에러 포맷 반영(최소 변경, alert 기반)
-      - 서버가 4xx/5xx로 내려줘도 JSON {ok:false,error:{code,message}}를 파싱해
-        code별 alert 메시지로 노출한다.
-      - API 배지는 "서버/네트워크(5xx/timeout/network)"일 때만 error로 표시한다.
-        (입력 오류 422는 API 연결 오류가 아님)
-
       최적화(v1)
       - Intl.NumberFormat / DOM 요소를 캐싱해 불필요한 DOM 탐색/객체생성 감소
       - 시나리오 테이블은 "추가 시 append", "삭제 시 해당 row만 remove"
@@ -52,17 +46,6 @@
       lastCheckedAt: null
     };
 
-    // ✅ 프론트용 구조화 에러
-    class ApiError extends Error {
-      constructor(code, message, status, details) {
-        super(message || "API Error");
-        this.name = "ApiError";
-        this.code = code || "E_API";
-        this.status = status || 0;
-        this.details = details;
-      }
-    }
-
     async function apiGet(path, { timeoutMs = 7000 } = {}) {
       const ctrl = new AbortController();
       const t = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -75,7 +58,6 @@
       }
     }
 
-    // ✅ 핵심 변경: 4xx/5xx여도 JSON 파싱해서 {code,message}를 살린다.
     async function apiPost(path, bodyObj, { timeoutMs = 8000 } = {}) {
       const ctrl = new AbortController();
       const t = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -88,43 +70,13 @@
           signal: ctrl.signal
         });
 
-        // 성공/실패 상관없이 JSON 파싱을 우선 시도
-        let data = null;
-        const ct = res.headers.get("content-type") || "";
-
-        if (ct.includes("application/json")) {
-          try { data = await res.json(); } catch (_) { data = null; }
-        } else {
-          let txt = "";
-          try { txt = await res.text(); } catch (_) {}
-          data = txt
-            ? { ok: false, error: { code: "E_NON_JSON", message: txt.slice(0, 200) } }
-            : null;
-        }
-
-        // HTTP 에러: 람다의 ok:false/error를 우선 사용
         if (!res.ok) {
-          const code = data?.error?.code || `HTTP_${res.status}`;
-          const message = data?.error?.message || `요청 실패 (HTTP ${res.status})`;
-          const details = data?.error?.details;
-          throw new ApiError(code, message, res.status, details);
+          let detail = "";
+          try { detail = await res.text(); } catch (_) {}
+          throw new Error(`POST ${path} ${res.status}${detail ? ` | ${detail.slice(0, 200)}` : ""}`);
         }
 
-        // HTTP 200인데 ok:false인 경우도 방어
-        if (data && data.ok === false) {
-          const code = data?.error?.code || "E_APP";
-          const message = data?.error?.message || "요청 실패";
-          const details = data?.error?.details;
-          throw new ApiError(code, message, res.status, details);
-        }
-
-        return data;
-      } catch (e) {
-        if (e?.name === "AbortError") {
-          throw new ApiError("E_TIMEOUT", "요청 시간이 초과되었습니다.", 0);
-        }
-        if (e instanceof ApiError) throw e;
-        throw new ApiError("E_NETWORK", "네트워크/서버 연결에 실패했습니다.", 0, { message: String(e?.message || e) });
+        return await res.json();
       } finally {
         clearTimeout(t);
       }
@@ -132,6 +84,7 @@
 
     async function serverCalc(mode, inputs) {
       const res = await apiPost("/calc", { app: "pro-consulting", mode, inputs });
+      if (!res?.ok) throw new Error(res?.error || "calc_failed");
       return res.result;
     }
 
@@ -164,10 +117,18 @@
     const NF_KRW = new Intl.NumberFormat("ko-KR", { style: "currency", currency: "KRW" });
     const NF_DEC0 = new Intl.NumberFormat("ko-KR", { style: "decimal", maximumFractionDigits: 0 });
 
-    function formatCurrency(val) { return NF_KRW.format(Number(val || 0)); }
-    function formatCompactCurrency(val) { return NF_DEC0.format(Math.round(Number(val || 0))); }
-    function formatRate(rate) { return (Number.isFinite(Number(rate)) ? Number(rate) : 0).toFixed(1); }
-    function toPercent(num) { return (Number.isFinite(Number(num)) ? Number(num) : 0).toFixed(1); }
+    function formatCurrency(val) {
+      return NF_KRW.format(Number(val || 0));
+    }
+    function formatCompactCurrency(val) {
+      return NF_DEC0.format(Math.round(Number(val || 0)));
+    }
+    function formatRate(rate) {
+      return (Number.isFinite(Number(rate)) ? Number(rate) : 0).toFixed(1);
+    }
+    function toPercent(num) {
+      return (Number.isFinite(Number(num)) ? Number(num) : 0).toFixed(1);
+    }
 
     /* =========================
       2) UI/모드/필드 설정
@@ -421,6 +382,9 @@
 
     /* =========================
       6) 입력 폼 렌더링/동기화
+      - disabled input은 "결과값"을 표시한다.
+      - enabled input은 "사용자 입력값"을 표시한다.
+      - 정책상 입력 중 계산이 없으므로, enabled input은 사용자가 넣은 값 그대로 유지.
     ========================= */
 
     function updateInputForm() {
@@ -490,6 +454,7 @@
 
     /* =========================
       8) 시나리오 테이블
+      - 성능: 전체 재렌더 대신 append/remove로 부분 업데이트
     ========================= */
 
     function renderScenarioEmpty() {
@@ -560,6 +525,8 @@
     }
 
     function renumberScenarioRows() {
+      // 삭제 후 번호만 재정렬(첫 번째 칸만 업데이트)
+      // sticky col-1 셀은 각 row의 첫 td 이므로, 그 td만 순회 업데이트
       const rows = state.dom.scenarioTableBody.querySelectorAll('tr[id^="scenario-row-"]');
       let i = 1;
       rows.forEach(row => {
@@ -678,20 +645,12 @@
 
       state.inputs[name] = rawValue;
 
-      // 입력 UX: 기존 동작 유지(입력 시 콤마 반영)
+      // 입력 UX: 기존 동작 유지(입력 시 콤마 반영) — 커서 튐이 불편하면 blur 포맷으로 바꾸는 게 더 좋음
       if (isMoneyText) el.value = rawValue ? rawValue.toLocaleString() : "";
     }
 
-    // ✅ 최소 변경: alert 기반 + code별 메시지 분기
     async function handleAddScenario() {
       try {
-        // (권장) 프론트 사전검증(서버 정책과 일치)
-        const tpr = Number(state.inputs.targetProfitRate || 0);
-        if ((state.calculationMode === "mode1" || state.calculationMode === "mode3") && tpr <= 0) {
-          alert("계산 불가: 목표소득률(targetProfitRate)은 0보다 커야 합니다. (mode1/mode3)");
-          return;
-        }
-
         const result = await serverCalc(state.calculationMode, state.inputs);
 
         state.lastCalculatedResults = result;
@@ -706,30 +665,11 @@
         appendScenarioRow(newScenario);
 
       } catch (e) {
-        const code = e?.code || "E_UNKNOWN";
-        let msg = e?.message || "계산 실패";
-
-        if (code === "E_TPR_NONPOSITIVE_FOR_MODE") {
-          msg = "목표소득률(targetProfitRate)은 0보다 커야 합니다. (mode1/mode3)";
-        } else if (code === "E_RESULT_NOT_FINITE") {
-          msg = "입력값 조합으로 계산이 성립하지 않습니다. (음수/NaN/Infinity 발생) 값 범위를 확인해주세요.";
-        } else if (code === "E_TIMEOUT") {
-          msg = "요청 시간이 초과되었습니다. 잠시 후 다시 시도해주세요.";
-        } else if (code === "E_NETWORK") {
-          msg = "서버 연결에 실패했습니다. URL/CORS/네트워크를 확인해주세요.";
-        }
-
-        alert(`계산 실패 [${code}]: ${msg}`);
-
-        // ✅ 422는 입력 오류(연결 오류 아님). 5xx/네트워크만 API badge error 처리.
-        const status = Number(e?.status || 0);
-        const isServerOrNetwork = (status >= 500) || code === "E_NETWORK" || code === "E_TIMEOUT";
-        if (isServerOrNetwork) {
-          API_STATUS.state = "error";
-          API_STATUS.message = "계산 실패(서버/네트워크)";
-          API_STATUS.lastCheckedAt = Date.now();
-          renderApiStatusBadge();
-        }
+        alert("계산 실패: 서버 응답을 확인하세요.");
+        API_STATUS.state = "error";
+        API_STATUS.message = "계산 실패(서버 응답 확인)";
+        API_STATUS.lastCheckedAt = Date.now();
+        renderApiStatusBadge();
       }
     }
 
@@ -783,6 +723,8 @@
         const inputEl = document.querySelector(`[name="${f.name}"]`);
         state.dom.inputs[f.name] = inputEl;
 
+        // 해당 input이 속한 label의 span(자동 산출됨)을 찾아 캐싱
+        // 구조가 바뀌더라도 label 내 span만 유지되면 동작하도록 범위를 최소화
         const wrapper = inputEl?.closest("div");
         const labelSpan = wrapper?.querySelector("label span");
         if (labelSpan) state.dom.inputLabels[f.name] = labelSpan;
@@ -927,8 +869,8 @@
           <div class="bg-slate-50 border border-slate-200 rounded-xl p-4 text-sm text-slate-600">
             <div class="font-semibold text-slate-700 mb-1">계산방식</div>
             <ul class="list-disc ml-5 space-y-1 text-[13px]">
-              <li>mode1/mode3에서 목표소득률이 0%이하인 경우 → 계산 불가(에러 안내)</li>
-              <li>국민연금 및 건강보험료는 목표소득을 기준으로 도출됨</li>
+              <li>목표소득률이 0%이하인 경우 → 0% 표기</li>
+              <li>국민연금 및 건강보험료는 목표소득을 기준으로 도출됨</span></li>
             </ul>
           </div>
         </div>
