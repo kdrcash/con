@@ -684,6 +684,17 @@
       renderScenarioEmpty();
     }
 
+    // ✅ 변경: "입력 초기화"는 입력 + 대시보드만 초기화 (시나리오는 유지)
+    function handleResetInputsOnly() {
+      state.inputs = { ...EMPTY_INPUTS };
+      state.lastCalculatedResults = { ...EMPTY_RESULTS };
+
+      updateInputForm();
+      renderDashboard();
+      // 시나리오/테이블/nextScenarioId는 건드리지 않음
+    }
+
+    // 기존: 전체 초기화(헤더 초기화는 그대로 전체 초기화 유지)
     function handleResetAll() {
       state.inputs = { ...EMPTY_INPUTS };
       state.lastCalculatedResults = { ...EMPTY_RESULTS };
@@ -735,8 +746,10 @@
       // 버튼 이벤트
       state.dom.addScenarioBtn?.addEventListener("click", handleAddScenario);
 
-      // 초기화 버튼(두 곳) 모두: 입력+대시보드+시나리오 전체 초기화
-      state.dom.resetInputsBtn?.addEventListener("click", handleResetAll);
+      // ✅ 변경: 좌측 "입력 초기화"는 입력+대시보드만 초기화
+      state.dom.resetInputsBtn?.addEventListener("click", handleResetInputsOnly);
+
+      // 헤더 "초기화"는 기존대로 전체 초기화 유지
       state.dom.headerResetBtn?.addEventListener("click", handleResetAll);
 
       state.dom.clearScenariosBtn?.addEventListener("click", handleClearScenarios);
