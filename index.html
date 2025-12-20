@@ -13,28 +13,6 @@
     .sticky-col-2 { left:40px; z-index:20; box-shadow:2px 0 5px -2px rgba(0,0,0,0.1); }
     .table-container { overflow-x:auto; }
     .sticky-col { position:sticky; }
-
-    /* =========================
-      (추가) Toast + 필드 하이라이트
-    ========================= */
-    #toast-layer { position: fixed; right: 18px; bottom: 18px; z-index: 9999; display: flex; flex-direction: column; gap: 10px; }
-    .toast {
-      min-width: 320px; max-width: 520px;
-      border-radius: 14px; border: 1px solid rgba(15,23,42,0.12);
-      background: #fff; padding: 12px 14px;
-      box-shadow: 0 10px 30px rgba(2,6,23,0.12);
-      display:flex; gap: 10px; align-items:flex-start;
-    }
-    .toast-icon { width: 26px; height: 26px; border-radius: 10px; display:flex; align-items:center; justify-content:center; font-size: 14px; margin-top: 1px; }
-    .toast-title { font-weight: 800; font-size: 12px; color: #0f172a; line-height: 1.1; }
-    .toast-msg { font-size: 12px; color: #475569; margin-top: 3px; line-height: 1.4; }
-    .toast-close { margin-left:auto; font-size: 12px; color:#94a3b8; cursor:pointer; padding: 2px 6px; border-radius: 8px; }
-    .toast-close:hover { background: rgba(148,163,184,0.15); }
-    .toast-error .toast-icon { background: rgba(239,68,68,0.12); color: rgb(185,28,28); }
-    .toast-success .toast-icon { background: rgba(16,185,129,0.12); color: rgb(4,120,87); }
-    .toast-info .toast-icon { background: rgba(59,130,246,0.12); color: rgb(29,78,216); }
-
-    .field-error-ring { border-color: rgb(248,113,113) !important; box-shadow: 0 0 0 3px rgba(248,113,113,0.25) !important; }
   </style>
 
   <script>
@@ -47,16 +25,17 @@
       - "🔄 초기화"(헤더) / "🔄 입력 초기화"(좌측) 버튼은
         입력 + 대시보드 + 시나리오까지 전부 초기화한다.
 
+      ✅ 서버(AppError) 에러 포맷 반영(최소 변경, alert 기반)
+      - 서버가 4xx/5xx로 내려줘도 JSON {ok:false,error:{code,message}}를 파싱해
+        code별 alert 메시지로 노출한다.
+      - API 배지는 "서버/네트워크(5xx/timeout/network)"일 때만 error로 표시한다.
+        (입력 오류 422는 API 연결 오류가 아님)
+
       최적화(v1)
       - Intl.NumberFormat / DOM 요소를 캐싱해 불필요한 DOM 탐색/객체생성 감소
       - 시나리오 테이블은 "추가 시 append", "삭제 시 해당 row만 remove"
         (전체 innerHTML 재생성 최소화)
       - 이벤트 바인딩 방식 통일(인라인 onclick 제거)
-
-      (추가) 에러 UX(v2)
-      - 서버가 { ok:false, code, error, field } 형태로 반환하면:
-        (1) 토스트 표시 (2) 해당 필드 하이라이트(빨간 링) (3) 포커스 이동
-      - alert 대신 토스트 사용 (warn 없이 error만)
     ====================================================================== */
 
     /* =========================
@@ -73,6 +52,17 @@
       lastCheckedAt: null
     };
 
+    // ✅ 프론트용 구조화 에러
+    class ApiError extends Error {
+      constructor(code, message, status, details) {
+        super(message || "API Error");
+        this.name = "ApiError";
+        this.code = code || "E_API";
+        this.status = status || 0;
+        this.details = details;
+      }
+    }
+
     async function apiGet(path, { timeoutMs = 7000 } = {}) {
       const ctrl = new AbortController();
       const t = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -85,6 +75,7 @@
       }
     }
 
+    // ✅ 핵심 변경: 4xx/5xx여도 JSON 파싱해서 {code,message}를 살린다.
     async function apiPost(path, bodyObj, { timeoutMs = 8000 } = {}) {
       const ctrl = new AbortController();
       const t = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -97,35 +88,51 @@
           signal: ctrl.signal
         });
 
-        // (추가) 에러 응답(JSON)도 최대한 파싱해서 field/code를 프런트에서 활용
-        if (!res.ok) {
-          let parsed = null;
-          try { parsed = await res.json(); } catch (_) {}
-          const err = new Error(`POST ${path} ${res.status}`);
-          err.httpStatus = res.status;
-          err.payload = parsed; // { ok:false, code, error, field ... } 기대
-          throw err;
+        // 성공/실패 상관없이 JSON 파싱을 우선 시도
+        let data = null;
+        const ct = res.headers.get("content-type") || "";
+
+        if (ct.includes("application/json")) {
+          try { data = await res.json(); } catch (_) { data = null; }
+        } else {
+          let txt = "";
+          try { txt = await res.text(); } catch (_) {}
+          data = txt
+            ? { ok: false, error: { code: "E_NON_JSON", message: txt.slice(0, 200) } }
+            : null;
         }
 
-        return await res.json();
+        // HTTP 에러: 람다의 ok:false/error를 우선 사용
+        if (!res.ok) {
+          const code = data?.error?.code || `HTTP_${res.status}`;
+          const message = data?.error?.message || `요청 실패 (HTTP ${res.status})`;
+          const details = data?.error?.details;
+          throw new ApiError(code, message, res.status, details);
+        }
+
+        // HTTP 200인데 ok:false인 경우도 방어
+        if (data && data.ok === false) {
+          const code = data?.error?.code || "E_APP";
+          const message = data?.error?.message || "요청 실패";
+          const details = data?.error?.details;
+          throw new ApiError(code, message, res.status, details);
+        }
+
+        return data;
+      } catch (e) {
+        if (e?.name === "AbortError") {
+          throw new ApiError("E_TIMEOUT", "요청 시간이 초과되었습니다.", 0);
+        }
+        if (e instanceof ApiError) throw e;
+        throw new ApiError("E_NETWORK", "네트워크/서버 연결에 실패했습니다.", 0, { message: String(e?.message || e) });
       } finally {
         clearTimeout(t);
       }
     }
 
     async function serverCalc(mode, inputs) {
-      try {
-        const res = await apiPost("/calc", { app: "pro-consulting", mode, inputs });
-        if (!res?.ok) {
-          const err = new Error(res?.error || "calc_failed");
-          err.payload = res;
-          throw err;
-        }
-        return res.result;
-      } catch (e) {
-        // apiPost에서 payload를 붙였으면 그대로 유지
-        throw e;
-      }
+      const res = await apiPost("/calc", { app: "pro-consulting", mode, inputs });
+      return res.result;
     }
 
     async function checkApiConnection() {
@@ -151,116 +158,16 @@
     }
 
     /* =========================
-      (추가) Toast + Field Highlight
-    ========================= */
-
-    const toastState = {
-      seq: 1,
-      timers: new Map()
-    };
-
-    function ensureToastLayer() {
-      let layer = document.getElementById("toast-layer");
-      if (!layer) {
-        layer = document.createElement("div");
-        layer.id = "toast-layer";
-        document.body.appendChild(layer);
-      }
-      return layer;
-    }
-
-    function showToast({ type = "error", title = "오류", message = "", durationMs = 3800 } = {}) {
-      const layer = ensureToastLayer();
-      const id = toastState.seq++;
-      const div = document.createElement("div");
-      div.className = `toast toast-${type}`;
-      const icon = type === "success" ? "✅" : type === "info" ? "ℹ️" : "⛔";
-
-      div.innerHTML = `
-        <div class="toast-icon">${icon}</div>
-        <div style="flex:1; min-width:0;">
-          <div class="toast-title">${escapeHtml(title)}</div>
-          <div class="toast-msg">${escapeHtml(message)}</div>
-        </div>
-        <div class="toast-close" data-toast-close="${id}">✕</div>
-      `;
-
-      layer.appendChild(div);
-
-      const close = () => {
-        if (toastState.timers.has(id)) clearTimeout(toastState.timers.get(id));
-        toastState.timers.delete(id);
-        div.remove();
-      };
-
-      div.querySelector(`[data-toast-close="${id}"]`)?.addEventListener("click", close);
-
-      const timer = setTimeout(close, durationMs);
-      toastState.timers.set(id, timer);
-    }
-
-    function escapeHtml(s) {
-      return String(s ?? "")
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#39;");
-    }
-
-    function clearFieldError(name) {
-      const el = state.dom.inputs[name];
-      if (!el) return;
-      el.classList.remove("field-error-ring");
-    }
-
-    function setFieldError(name) {
-      const el = state.dom.inputs[name];
-      if (!el) return;
-      el.classList.add("field-error-ring");
-      try { el.focus({ preventScroll: false }); } catch (_) { try { el.focus(); } catch(__){} }
-    }
-
-    function applyServerErrorUX(err) {
-      // err.payload 우선 (apiPost가 붙인 것)
-      const payload = err?.payload || null;
-      const code = payload?.code || "CALC_FAILED";
-      const field = payload?.field || null;
-      const msg = payload?.error || err?.message || "계산 실패";
-
-      showToast({
-        type: "error",
-        title: "계산할 수 없는 조건입니다",
-        message: msg
-      });
-
-      if (field) setFieldError(field);
-
-      API_STATUS.state = "error";
-      API_STATUS.message = `계산 실패(${code})`;
-      API_STATUS.lastCheckedAt = Date.now();
-      renderApiStatusBadge();
-    }
-
-    /* =========================
       1) 포맷터(캐시)
     ========================= */
 
     const NF_KRW = new Intl.NumberFormat("ko-KR", { style: "currency", currency: "KRW" });
     const NF_DEC0 = new Intl.NumberFormat("ko-KR", { style: "decimal", maximumFractionDigits: 0 });
 
-    function formatCurrency(val) {
-      return NF_KRW.format(Number(val || 0));
-    }
-    function formatCompactCurrency(val) {
-      return NF_DEC0.format(Math.round(Number(val || 0)));
-    }
-    function formatRate(rate) {
-      return (Number.isFinite(Number(rate)) ? Number(rate) : 0).toFixed(1);
-    }
-    function toPercent(num) {
-      return (Number.isFinite(Number(num)) ? Number(num) : 0).toFixed(1);
-    }
+    function formatCurrency(val) { return NF_KRW.format(Number(val || 0)); }
+    function formatCompactCurrency(val) { return NF_DEC0.format(Math.round(Number(val || 0))); }
+    function formatRate(rate) { return (Number.isFinite(Number(rate)) ? Number(rate) : 0).toFixed(1); }
+    function toPercent(num) { return (Number.isFinite(Number(num)) ? Number(num) : 0).toFixed(1); }
 
     /* =========================
       2) UI/모드/필드 설정
@@ -530,7 +437,7 @@
           disabled
             ? "bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed"
             : "bg-white border-slate-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-        }` + (inputEl.classList.contains("field-error-ring") ? " field-error-ring" : "");
+        }`;
 
         inputEl.placeholder = disabled ? "자동 계산" : "0";
 
@@ -744,9 +651,6 @@
     ========================= */
 
     function setCalculationMode(modeId) {
-      // (추가) 모드 변경 시 이전 에러 하이라이트 제거
-      Object.keys(state.dom.inputs).forEach(clearFieldError);
-
       state.calculationMode = modeId;
       renderModeSelectors();
       updateInputForm();
@@ -759,9 +663,6 @@
       if (!name) return;
 
       if (isInputDisabled(name, state.calculationMode)) return;
-
-      // (추가) 사용자가 수정 시작하면 해당 필드 에러 링 제거
-      clearFieldError(name);
 
       const type = el.type;
       const isMoneyText = (type === "text" && ["annualRevenue","monthlyExpense","monthlyRequiredExpense","afterTaxNetIncome"].includes(name));
@@ -777,14 +678,20 @@
 
       state.inputs[name] = rawValue;
 
+      // 입력 UX: 기존 동작 유지(입력 시 콤마 반영)
       if (isMoneyText) el.value = rawValue ? rawValue.toLocaleString() : "";
     }
 
+    // ✅ 최소 변경: alert 기반 + code별 메시지 분기
     async function handleAddScenario() {
-      // (추가) 이전 에러 하이라이트 제거
-      Object.keys(state.dom.inputs).forEach(clearFieldError);
-
       try {
+        // (권장) 프론트 사전검증(서버 정책과 일치)
+        const tpr = Number(state.inputs.targetProfitRate || 0);
+        if ((state.calculationMode === "mode1" || state.calculationMode === "mode3") && tpr <= 0) {
+          alert("계산 불가: 목표소득률(targetProfitRate)은 0보다 커야 합니다. (mode1/mode3)");
+          return;
+        }
+
         const result = await serverCalc(state.calculationMode, state.inputs);
 
         state.lastCalculatedResults = result;
@@ -798,11 +705,31 @@
         renderDashboard();
         appendScenarioRow(newScenario);
 
-        // (추가) 성공 토스트는 과하지 않게(원하면 주석 해제)
-        // showToast({ type:"success", title:"계산 완료", message:"시나리오가 추가되었습니다.", durationMs: 2200 });
-
       } catch (e) {
-        applyServerErrorUX(e);
+        const code = e?.code || "E_UNKNOWN";
+        let msg = e?.message || "계산 실패";
+
+        if (code === "E_TPR_NONPOSITIVE_FOR_MODE") {
+          msg = "목표소득률(targetProfitRate)은 0보다 커야 합니다. (mode1/mode3)";
+        } else if (code === "E_RESULT_NOT_FINITE") {
+          msg = "입력값 조합으로 계산이 성립하지 않습니다. (음수/NaN/Infinity 발생) 값 범위를 확인해주세요.";
+        } else if (code === "E_TIMEOUT") {
+          msg = "요청 시간이 초과되었습니다. 잠시 후 다시 시도해주세요.";
+        } else if (code === "E_NETWORK") {
+          msg = "서버 연결에 실패했습니다. URL/CORS/네트워크를 확인해주세요.";
+        }
+
+        alert(`계산 실패 [${code}]: ${msg}`);
+
+        // ✅ 422는 입력 오류(연결 오류 아님). 5xx/네트워크만 API badge error 처리.
+        const status = Number(e?.status || 0);
+        const isServerOrNetwork = (status >= 500) || code === "E_NETWORK" || code === "E_TIMEOUT";
+        if (isServerOrNetwork) {
+          API_STATUS.state = "error";
+          API_STATUS.message = "계산 실패(서버/네트워크)";
+          API_STATUS.lastCheckedAt = Date.now();
+          renderApiStatusBadge();
+        }
       }
     }
 
@@ -818,9 +745,6 @@
     }
 
     function handleResetAll() {
-      // (추가) 에러 하이라이트 제거
-      Object.keys(state.dom.inputs).forEach(clearFieldError);
-
       state.inputs = { ...EMPTY_INPUTS };
       state.lastCalculatedResults = { ...EMPTY_RESULTS };
       state.scenarios = [];
@@ -1003,7 +927,7 @@
           <div class="bg-slate-50 border border-slate-200 rounded-xl p-4 text-sm text-slate-600">
             <div class="font-semibold text-slate-700 mb-1">계산방식</div>
             <ul class="list-disc ml-5 space-y-1 text-[13px]">
-              <li>목표소득률이 0%이하인 경우 → 0% 표기</li>
+              <li>mode1/mode3에서 목표소득률이 0%이하인 경우 → 계산 불가(에러 안내)</li>
               <li>국민연금 및 건강보험료는 목표소득을 기준으로 도출됨</li>
             </ul>
           </div>
